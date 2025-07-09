@@ -58,7 +58,7 @@ Rationale (from the preprint):
 
 > To convert the number of marker gene sequence clusters into a corresponding number of species-level clusters, we estimated conversion factors as follows. First, we generated marker gene cluster discovery curves via iterative logarithmic rarefaction, i.e. we downsampled the number of considered gene sequences along a logarithmic scale (10, 20,…, 100 sequences; 200, 300,…, 1000 sequences; etc) with 10 iterations at each step. At each rarefaction point, we recorded the number of ‘discovered’ marker gene sequence clusters and the number of represented species or species-level genome clusters in proGenomes3, GTDB r220 and among SPIRE MAGs, considering each data source individually. We then used linear regression models of the type number_of_species ∼ number_of_gene_clusters with a forced intercept at 0 along these rarefactions to estimate gene cluster to species conversion factors (i.e., the number of newly discovered species per newly discovered marker gene cluster). Based on benchmarks of marker gene sequence similarity cutoffs ranging from 95% to 99.5%, we based further analyses on 96.5% clusters as these showed very robust linear fits (with standard errors in the range of 10^-3) with conversion factors closest to identity (i.e., roughly one species discovered per marker gene cluster discovered), and high consistency across the different species-level reference clusterings in the underlying datasets (based on 40 specI marker genes in proGenomes3, 95% whole-genome ANI in GTDB and a combination of both approaches among SPIRE MAGs).
 
-The corresponding code can be found in [01.parse_clustering.Rmd]().
+The corresponding code can be found in [01.parse_clustering.Rmd](https://github.com/grp-schmidt/ms-census/blob/main/R/01.parse_clustering.Rmd).
 
 The resulting estimated conversion factors approximate real species counts well:
 
@@ -76,7 +76,7 @@ Rationale (from the preprint):
 > 
 > In an independent approach, we performed an ‘incremental’ rarefaction, stratified by habitats: we sequentially added samples from each of the 32 broadly defined habitat categories, starting with ‘adult, healthy human gut’ samples, randomized discovery order within each habitat block and then tracked the globally discovered species (see Figure 2). In other words, we tracked the contribution of each habitat to overall discovered species diversity, beyond the diversity discovered in previously considered habitats.
 
-The corresponding code can be found in [02.job.perform_rarefactions.R]()
+The corresponding code can be found in [02.job.perform_rarefactions.R](https://github.com/grp-schmidt/ms-census/blob/main/R/02.job.perform_rarefactions.R)
 
 ---
 
@@ -102,7 +102,7 @@ Further, on `species discovery coefficients`:
 > 
 > and summarised values across marker genes within each domain-specific set as median values. Thus defined, α scales on [-∞, 1], although only mildly negative values are expected to be observed in practice. If α ≤ 0, species discovery in a habitat is saturated, meaning that adding more samples of the same type is not expected to add novel species to the survey – analogous to a ‘closed’ microbial pangenome where additional strains do not add novel genes. Values for α in [0, 1] correspond to unsaturated species discovery curves where additional samples continue to add novel species to the survey (analogous to ‘open’ pangenomes); lower α values indicate a more pronounced ‘flattening off’ in the rarefaction curve, indicating a more pronounced slowdown in novel species discovery; higher α values indicate a less pronounced decrease in the rate of species discovery. For α -> 1, species discovery is fully unsaturated, meaning that each newly added sample adds novel species to the survey, with no discernible ‘flattening off’ in the species discovery curve.
 
-The corresponding code can be found in [03.analyze_rarefactions.Rmd](). The code was used to generate the plots underlying figures 1, 2 & S1-S3 in the manuscript.
+The corresponding code can be found in [03.analyze_rarefactions.Rmd](https://github.com/grp-schmidt/ms-census/blob/main/R/03.analyze_rarefactions.Rmd). The code was used to generate the plots underlying figures 1, 2 & S1-S3 in the manuscript.
 
 ---
 
@@ -148,8 +148,8 @@ Rationale (from the preprint):
 
 The corresponding code can be found in
 
-* [04.job.infer_red_trees.R]() for the inference of deeper clades based on RED cutoff, per marker gene (script works specifically for Bacteria, hard-coded defaults need to be adapted for Archaea)
-*  [05.analyze_phylogenies.Rmd]() to generate analyses and plots underlying Figure 4 in the manuscript.
+* [04.job.infer_red_trees.R](https://github.com/grp-schmidt/ms-census/blob/main/R/04.job.infer_red_trees.R) for the inference of deeper clades based on RED cutoff, per marker gene (script works specifically for Bacteria, hard-coded defaults need to be adapted for Archaea)
+*  [05.analyze_phylogenies.Rmd](https://github.com/grp-schmidt/ms-census/blob/main/R/05.analyze_phylogenies.Rmd) to generate analyses and plots underlying Figure 4 in the manuscript.
 
 ---
 
