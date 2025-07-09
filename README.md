@@ -30,9 +30,9 @@ From the preprint:
 
 The corresponding HMM models were downloaded via the GTDB-tk release v2. They remain, to our knowledge, unchanged in the GTDB since at least release GTDB r207 (current at time of writing is r226). Metadata on both sets is available online:
 
-`arc53`: [ar53_metadata_r207.tsv.gz](https://data.ace.uq.edu.au/public/gtdb/data/releases/release207/207.0/ar53_metadata_r207.tsv.gz)
+`arc53`: [ar53_msa_marker_info_r207.tsv](https://data.ace.uq.edu.au/public/gtdb/data/releases/release207/207.0/auxillary_files/ar53_msa_marker_info_r207.tsv)
 
-`bac120`: [bac120_metadata_r207.tar.gz](https://data.ace.uq.edu.au/public/gtdb/data/releases/release207/207.0/bac120_metadata_r207.tar.gz)
+`bac120`: [bac120_msa_marker_info_r207.tsv](https://data.ace.uq.edu.au/public/gtdb/data/releases/release207/207.0/auxillary_files/bac120_msa_marker_info_r207.tsv)
 
 ---
 
