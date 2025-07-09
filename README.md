@@ -60,6 +60,11 @@ Rationale (from the preprint):
 
 The corresponding code can be found in []().
 
+The resulting estimated conversion factors approximate real species counts well:
+
+![image](https://github.com/user-attachments/assets/e8c88322-f4b2-4942-b647-dc7583d9dcf8)
+
+
 ---
 
 ## Availability of underlying data
