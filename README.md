@@ -8,8 +8,55 @@ Cataloguing Earth’s biodiversity remains one of biology’s most formidable ch
 
 ## Description
 
+### Data sources
 
+The analyses are based on assembled contigs and genomes (based on cultivated isolates or as Metagenome-Assembled Genomes) from three sources:
 
+proGenomes v3 (**PG3**), Fullam et al (Nucl Acid Res, 2023). [paper](https://academic.oup.com/nar/article/51/D1/D760/6835361). [website](https://progenomes.embl.de).
+
+Genome Taxonomy Database (**GTDB**) r220, Parks et al (Nucl Acid Res, 2022). [paper](https://academic.oup.com/nar/article/50/D1/D785/6370255). [website](https://gtdb.ecogenomic.org/stats/r220).
+
+Searchaeble Planetary-scale mIcrobiome REsource (**SPIRE**) v1.1, Schmidt et al (2024). [paper](https://academic.oup.com/nar/article/52/D1/D777/7332059). [website](spire.embl.de).
+
+From the preprint:
+
+> Genomes from all three datasets were downloaded and taxonomically (re-)classified against the GTDB r220 using GTDB-tk v2.4.0, and consensus taxonomies for species-level clusters were inferred based on adjusted majority votes, as described previously. Compared to SPIRE v1.0, 6,959 metagenomic samples were excluded for the present analysis based on data type and provenance (e.g., excluding samples explicitly enriched for viruses) or insufficient assembly size. For the remaining 92,187 samples, habitat annotations and contextual data were updated by manually curating against an extended microntology v0.3.0 encompassing 103 terms and categories [...] and further organised into 32 higher-level categories.
+
+---
+
+### Extraction of marker genes.
+
+> The majority of analyses presented in the main text are based on 168 near-universal taxonomic marker genes as established by the GTDB: 120 bacterial (‘bac120’, [Parks et al, 2017](https://www.nature.com/articles/s41564-017-0012-7)) and 53 archaeal (‘arc53’, [Dombrowski et al, 2020](https://pubmed.ncbi.nlm.nih.gov/32770105/)) markers, with an overlap of five genes. We downloaded profile Hidden Markov Models (HMMs) for these marker sets as part of the GTDB-tk v2.4.0 database and used the HMMER v3.4 hmmsearch routine to identify and extract marker gene sequences among predicted Open Reading Frames (ORFs).
+
+The corresponding HMM models were downloaded via the GTDB-tk release v2. They remain, to our knowledge, unchanged in the GTDB since at least release GTDB r207 (current at time of writing is r226). Metadata on both sets is available online:
+
+`arc53`: [ar53_metadata_r207.tsv.gz](https://data.ace.uq.edu.au/public/gtdb/data/releases/release207/207.0/ar53_metadata_r207.tsv.gz)
+
+`bac120`: [bac120_metadata_r207.tar.gz](https://data.ace.uq.edu.au/public/gtdb/data/releases/release207/207.0/bac120_metadata_r207.tar.gz)
+
+---
+
+### Clustering of marker genes.
+
+Extracted marker gene sequences were clustered at various similarity thresholds ranging from 95% to 99% using the [MMseqs2]([https://www.nature.com/articles/s41467-018-04964-5](https://mmseqs.com/latest/userguide.pdf)) `cascading clustering` routine. For further analyses, the 96.5% threshold was selected (see preprint).
+
+Commands used:
+
+```
+mmseqs creatdb [marker_id].faa [marker_id].db
+mmseqs cluster [marker_id].db [marker_id].clustered tmp.clustering --min-seq-id [cutoff] --threads 24 --split-memory-limit 200G
+mmseqs createtsv [marker_id].db [marker_id].db [marker_id].clustered [marker_id].clustered.tsv
+```
+
+_Note_: `[marker_id].faa` contain the extracted sequences for *one* marker gene at a time, from all three data sources (PG3, GTDB r220 and SPIRE).
+
+### Parse clustering data and infer cluster_count-to-species_count conversion factors
+
+Rationale (from the preprint):
+
+> To convert the number of marker gene sequence clusters into a corresponding number of species-level clusters, we estimated conversion factors as follows. First, we generated marker gene cluster discovery curves via iterative logarithmic rarefaction, i.e. we downsampled the number of considered gene sequences along a logarithmic scale (10, 20,…, 100 sequences; 200, 300,…, 1000 sequences; etc) with 10 iterations at each step. At each rarefaction point, we recorded the number of ‘discovered’ marker gene sequence clusters and the number of represented species or species-level genome clusters in proGenomes3, GTDB r220 and among SPIRE MAGs, considering each data source individually. We then used linear regression models of the type number_of_species ∼ number_of_gene_clusters with a forced intercept at 0 along these rarefactions to estimate gene cluster to species conversion factors (i.e., the number of newly discovered species per newly discovered marker gene cluster). Based on benchmarks of marker gene sequence similarity cutoffs ranging from 95% to 99.5%, we based further analyses on 96.5% clusters as these showed very robust linear fits (with standard errors in the range of 10^-3) with conversion factors closest to identity (i.e., roughly one species discovered per marker gene cluster discovered), and high consistency across the different species-level reference clusterings in the underlying datasets (based on 40 specI marker genes in proGenomes3, 95% whole-genome ANI in GTDB and a combination of both approaches among SPIRE MAGs).
+
+The corresponding code can be found in []().
 
 ## Availability of underlying data
 
