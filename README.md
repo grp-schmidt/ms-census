@@ -50,6 +50,8 @@ mmseqs createtsv [marker_id].db [marker_id].db [marker_id].clustered [marker_id]
 
 _Note_: `[marker_id].faa` contain the extracted sequences for *one* marker gene at a time, from all three data sources (PG3, GTDB r220 and SPIRE).
 
+---
+
 ### Parse clustering data and infer cluster_count-to-species_count conversion factors
 
 Rationale (from the preprint):
@@ -57,6 +59,8 @@ Rationale (from the preprint):
 > To convert the number of marker gene sequence clusters into a corresponding number of species-level clusters, we estimated conversion factors as follows. First, we generated marker gene cluster discovery curves via iterative logarithmic rarefaction, i.e. we downsampled the number of considered gene sequences along a logarithmic scale (10, 20,…, 100 sequences; 200, 300,…, 1000 sequences; etc) with 10 iterations at each step. At each rarefaction point, we recorded the number of ‘discovered’ marker gene sequence clusters and the number of represented species or species-level genome clusters in proGenomes3, GTDB r220 and among SPIRE MAGs, considering each data source individually. We then used linear regression models of the type number_of_species ∼ number_of_gene_clusters with a forced intercept at 0 along these rarefactions to estimate gene cluster to species conversion factors (i.e., the number of newly discovered species per newly discovered marker gene cluster). Based on benchmarks of marker gene sequence similarity cutoffs ranging from 95% to 99.5%, we based further analyses on 96.5% clusters as these showed very robust linear fits (with standard errors in the range of 10^-3) with conversion factors closest to identity (i.e., roughly one species discovered per marker gene cluster discovered), and high consistency across the different species-level reference clusterings in the underlying datasets (based on 40 specI marker genes in proGenomes3, 95% whole-genome ANI in GTDB and a combination of both approaches among SPIRE MAGs).
 
 The corresponding code can be found in []().
+
+---
 
 ## Availability of underlying data
 
