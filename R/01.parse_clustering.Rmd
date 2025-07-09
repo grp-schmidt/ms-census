@@ -1,0 +1,413 @@
+---
+title: 'Census: Parse Gene Clustering'
+author: "Vishnu Prasoodanan, Oleks Maistrenko & Sebastian Schmidt"
+date: "2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(stringsAsFactors = FALSE)
+```
+
+## Prepare environment
+
+```{r}
+library(tidyverse)
+library(extrafont)
+extrafont::loadfonts()
+```
+
+Set paths and parameters.
+
+```{r}
+#Preallocate global data structures
+PARAM <- list()
+
+#Set relevant folder names
+PARAM$folder.Rmd <- paste0(getwd(), "/")
+PARAM$folder.base <- gsub("Rmd/", "", PARAM$folder.Rmd)
+PARAM$folder.data <- paste0(PARAM$folder.base, "data/")
+PARAM$folder.data.rarefaction <- paste0(PARAM$folder.data, "hmm_gtdb.clustering/")
+```
+
+## Read data
+
+Load sample metadata.
+
+```{r}
+PARAM$file.sample_data <- paste0(PARAM$folder.base, "metadata/data.sample.clean.Rdata")
+load(PARAM$file.sample_data)
+```
+
+Load SPIRE genome data.
+
+```{r}
+PARAM$file.genome_data.spire <- paste0(PARAM$folder.base, "data/dat.genome.spire.Rdata")
+load(PARAM$file.genome_data.spire)
+```
+
+Load PG3 genome data.
+
+```{r}
+PARAM$file.genome_data.pg3 <- paste0(PARAM$folder.base, "data/data.genome.fr13.Rdata")
+load(PARAM$file.genome_data.pg3)
+```
+
+Read HMM metadata.
+
+```{r}
+tmp.ar53 <- read_tsv("https://data.ace.uq.edu.au/public/gtdb/data/releases/release207/207.0/auxillary_files/ar53_msa_marker_info_r207.tsv") %>%
+  mutate(
+    marker_id = str_remove(str_remove(`Marker Id`, "PFAM_"), "TIGR_"),
+    domain = "Archaea"
+  ) %>%
+  select(
+    marker_id,
+    domain,
+    name = Name,
+    description = Description,
+    length_aa = `Length (bp)`,
+    single_copy = `Single copy (%)`,
+    ubiquity = `Ubiquity (%)`
+  )
+
+tmp.bac120 <- read_tsv("https://data.ace.uq.edu.au/public/gtdb/data/releases/release207/207.0/auxillary_files/bac120_msa_marker_info_r207.tsv") %>%
+  mutate(
+    marker_id = str_remove(str_remove(`Marker Id`, "PFAM_"), "TIGR_"),
+    domain = "Bacteria"
+  ) %>%
+  select(
+    marker_id,
+    domain,
+    name = Name,
+    description = Description,
+    length_aa = `Length (bp)`,
+    single_copy = `Single copy (%)`,
+    ubiquity = `Ubiquity (%)`
+  )
+
+dat.hmm <- bind_rows(tmp.ar53, tmp.bac120)
+```
+
+Get a list of marker genes that are "redundant" (i.e., used in both the bacterial and archaeal domain).
+
+```{r}
+dat.hmm %>%
+  group_by(name) %>%
+  tally() %>%
+  filter(n > 1) %>%
+  pull(name) -> drop.redundant.markers
+```
+
+## Process Clustering Data
+
+Iterate through HMMs, load data, consolidate and then store.
+
+```{r}
+collect.clustering <- collect.cluster_data <- list()
+collect.rarefaction <- lm.cluster_species <- tibble()
+
+#loop through markers
+for (mid in dat.hmm$marker_id) {
+  #Preallocate current data collector
+  curr.clustering <- tibble()
+  
+  for (cutoff in c("965")) {
+    ############################################################################
+    writeLines(paste(date(), "=>", mid, cutoff))
+    ############################################################################
+    
+    
+    ############################################################################
+    #Read data
+    curr.file <- paste0(PARAM$folder.data, "hmm_gtdb207/clustering/", mid, ".clustered.", cutoff, ".tsv.gz")
+    
+    if (!file.exists(curr.file)) {writeLines(paste(date(), "=> FILE NOT FOUND: ", curr.file)); next()}
+    tmp <- read_tsv(curr.file, col_names = c("ref", "query"))
+    
+    #Get clustering data
+    tmp.clustering <- tmp %>%
+      group_by(ref) %>%
+      tally(sort = T) %>%
+      mutate(
+        cutoff = cutoff,
+        cluster = str_c(mid, "_", cutoff, "_", sprintf("%07d", 1:n()))
+      ) %>%
+      select(cluster, ref, cutoff, size = n)
+    
+    #Re-consolidate clustering data
+    tmp.consolidated <- tmp %>%
+      left_join(tmp.clustering, by = "ref") %>%
+      #Get genome source
+      mutate(
+        source = case_when(
+          grepl("GB_", query) | grepl("RS_", query) ~ "gtdb_r220",
+          grepl("\\.GCA", query) ~ "pg3",
+          T ~ "spire"
+        )
+      )
+    ############################################################################
+    
+    
+    ############################################################################
+    #Retrieve cluster info
+    writeLines(paste(date(), "=> retrieving contig mapping"))
+    ############################################################################
+    tmp.spire <- tmp.consolidated %>%
+      filter(source == "spire") %>%
+      #head(1000) %>%
+      separate(query, sep = ";", into = c("study_id", "sample_name", "gene")) %>%
+      select(sample_name, gene, cluster:source) %>%
+      left_join(sql.samples %>% select(sample_name, study_id, sample_id = id), by = "sample_name") %>%
+      separate(gene, sep = "_", into = c("kmer_size", "contig_ordinal", "gene_ordinal")) %>%
+      mutate(
+        #kmer_size = as.integer(str_remove(kmer_size, "k")),
+        contig_ordinal = as.integer(contig_ordinal)
+      ) %>%
+      select(-kmer_size) %>%
+      relocate(study_id, sample_id) %>%
+      left_join(sql.contigs, by = c("sample_id", "contig_ordinal"))
+    ############################################################################
+    
+    
+    ############################################################################
+    #Merge with taxonomy / clustering info
+    writeLines(paste(date(), "=> merge clustering info"))
+    ############################################################################
+    #Join with taxonomy/clustering for SPIRE
+    tmp.spire.binned <- tmp.spire %>%
+      filter(!is.na(bin_id)) %>%
+      left_join(sql.bins.in_spire %>% select(-sample_id), by = c("bin_id" = "id")) %>%
+      left_join(sql.gtdb_r220 %>% select(bin_id, domain:species), by = "bin_id") %>%
+      left_join(dat.genome %>% select(bin_name = bin_id, spire_v1_cluster), by = "bin_name")
+    
+    #Join with taxonomy for GTDB
+    tmp.gtdb <- tmp.consolidated %>%
+      filter(source == "gtdb_r220") %>%
+      mutate(genome = query) %>%
+      left_join(tax.gtdb, by = c("genome" = "genome_id"))
+    
+    #Join with taxonomy for PG3
+    tmp.pg3 <- tmp.consolidated %>%
+      filter(source == "pg3") %>%
+      mutate(
+        genome = str_replace(query, ".+\\.GCA", "GCA") %>% sub(pattern = "_(\\d+)_(\\d+)", replacement = "_\\1.1")
+      ) %>%
+      #Fix genome IDs, first round
+      mutate(
+        genome = case_when(
+          genome %in% tax.pg3$sample_name ~ genome,
+          T ~ str_replace(genome, "\\.1", "\\.2")
+        )
+      ) %>%
+      #Fix genome IDs, second round
+      mutate(
+        genome = case_when(
+          genome %in% tax.pg3$sample_name ~ genome,
+          T ~ str_replace(genome, "\\.2", "\\.3")
+        )
+      ) %>%
+      left_join(tax.pg3, by = c("genome" = "sample_name"))
+    
+    #Remerge tables for ref genomes
+    curr.consolidated <- bind_rows(tmp.gtdb, tmp.pg3) %>%
+      filter(species != "s__")
+    
+    #Prefilter SPIRE tables
+    curr.consolidated.spire_species <- tmp.spire.binned %>%
+      filter(species != "s__")
+    ############################################################################
+    
+    
+    ############################################################################
+    #Rarefy the n of clusters discovered per n of species "discovered"
+    writeLines(paste(date(), "=> performing rarefactions"))
+    ############################################################################
+    curr.rarefaction <- tibble()
+    curr.rarefaction.steps <- c(
+      seq(10, 100, by = 10),
+      seq(10^2, 10^3, by = 100),
+      seq(10^3, 10^4, by = 1000),
+      seq(10^4, 10^5, by = 10000),
+      seq(round(0.1 * nrow(curr.consolidated)), nrow(curr.consolidated), by = round(0.1 * nrow(curr.consolidated))),
+      nrow(curr.consolidated.spire_species),
+      nrow(tmp.spire.binned)
+    )
+    curr.rarefaction.steps <- unique(sort(curr.rarefaction.steps[curr.rarefaction.steps <= nrow(curr.consolidated)]))
+    ############################################################################
+    for (n_row in curr.rarefaction.steps) {
+      ############################################################################
+      writeLines(paste(date(), "=>", n_row))
+      ############################################################################
+      
+      for (i in 1:10) {
+        #Ref genomes
+        tmp.rarefied.pg3_gtdb <- curr.consolidated %>%
+          slice_sample(n = n_row) %>%
+          group_by(source) %>%
+          summarise(
+            n.species = n_distinct(species),
+            n.cluster = n_distinct(cluster)
+          ) %>%
+          mutate(iter = i, n.row = n_row)
+        
+        #Add results on ref genomes
+        curr.rarefaction <- bind_rows(curr.rarefaction, tmp.rarefied.pg3_gtdb)
+        
+        #Add results on SPIRE MAGs by GTDB species, if applicable
+        if (n_row <= nrow(curr.consolidated.spire_species)) {
+          tmp.rarefied.spire_species <- curr.consolidated.spire_species %>%
+            slice_sample(n = n_row) %>%
+            summarise(
+              n.species = n_distinct(species),
+              n.cluster = n_distinct(cluster)
+            ) %>%
+            mutate(source = "spire.species", iter = i, n.row = n_row) %>%
+            select(source, n.species, n.cluster, iter, n.row)
+          
+          curr.rarefaction <- bind_rows(curr.rarefaction, tmp.rarefied.spire_species)
+        }
+        
+        #Add results on SPIRE MAGs by 95% cluster, if applicable
+        if (n_row <= nrow(tmp.spire.binned)) {
+          tmp.rarefied.spire_cluster <- tmp.spire.binned %>%
+            slice_sample(n = n_row) %>%
+            summarise(
+              n.species = n_distinct(spire_v1_cluster),
+              n.cluster = n_distinct(cluster)
+            ) %>%
+            mutate(source = "spire.ani_cluster", iter = i, n.row = n_row) %>%
+            select(source, n.species, n.cluster, iter, n.row)
+          
+          curr.rarefaction <- bind_rows(curr.rarefaction, tmp.rarefied.spire_cluster)
+        }
+        
+      }
+    }
+    #Store
+    collect.rarefaction <- bind_rows(
+      collect.rarefaction,
+      curr.rarefaction %>%
+        mutate(marker_id = mid, cutoff = cutoff) %>%
+        relocate(marker_id, cutoff)
+    )
+    ############################################################################
+    
+    
+    ############################################################################
+    #Infer parameters to predict n of species discovered per "discovered" gene cluster
+    curr.lm <- curr.rarefaction %>%
+      nest_by(source) %>%
+      mutate(model = list(lm(n.species ~ n.cluster + 0, data = data))) %>%
+      reframe(broom::tidy(model)) %>%
+      mutate(
+        marker_id = mid,
+        cutoff = cutoff
+      ) %>%
+      relocate(marker_id, cutoff)
+    lm.cluster_species <- bind_rows(
+      lm.cluster_species,
+      curr.lm
+    )
+    ############################################################################
+    
+    
+    ############################################################################
+    #Re-consolidate and store clustering data
+    writeLines(paste(date(), "=> consolidating clustering data"))
+    ############################################################################
+    #Clustering data "by gene"
+    dat.clustering.by_gene <- tmp.spire %>%
+      mutate(query = str_c(study_id, sample_id, contig_ordinal, gene_ordinal, sep = ";")) %>%
+      mutate(
+        source = case_when(
+          is.na(bin_id) ~ "spire.unbinned",
+          T ~ "spire.mag"
+        )
+      ) %>%
+      left_join(sql.bins.in_spire %>% select(-sample_id), by = c("bin_id" = "id")) %>%
+      select(
+        query,
+        cluster,
+        cutoff,
+        sample_id,
+        sample_name,
+        source,
+        bin_id,
+        bin_name
+      ) %>%
+      bind_rows(
+        bind_rows(tmp.gtdb, tmp.pg3) %>%
+          mutate(sample_id = NA, sample_name = NA, bin_id = NA) %>%
+          select(
+            query,
+            cluster,
+            cutoff,
+            source,
+            bin_id,
+            bin_name = genome
+          )
+      )
+    
+    #Summary stats "by cluster"
+    dat.clustering.by_cluster <- dat.clustering.by_gene %>%
+      group_by(source, cutoff, cluster) %>%
+      tally()
+    
+    tmp.clust.list <- dat.clustering.by_cluster %>%
+      filter(source != "spire.unbinned") %>%
+      pull(cluster)
+    
+    dat.clustering.by_cluster %>%
+      filter(!cluster %in% tmp.clust.list)
+    
+    #Stpre
+    save(dat.clustering.by_gene, dat.clustering.by_cluster, file = paste0(PARAM$folder.data, "/hmm_gtdb207/clustering/", mid, ".spire_gtdb.clustered.", cutoff, ".Rdata"))
+    save(collect.rarefaction, lm.cluster_species, file = paste0(PARAM$folder.data, "/hmm_gtdb207/clustering/00_SUMMARY.spire_gtdb.clustered.rarefaction.Rdata"))
+    ############################################################################
+  }
+}
+
+```
+
+Check parameters for `n.cluster` -> `n.species` regressions.
+
+```{r, fig.width=8, fig.height=6}
+lm.cluster_species %>%
+  filter(cutoff == "965") %>%
+  left_join(dat.hmm %>% select(marker_id, domain), by = "marker_id") %>%
+  group_by(marker_id, source) %>%
+  filter(n() == 1) %>%
+  ungroup() %>%
+  ggplot(aes(x = source, y = std.error, colour = source)) +
+    geom_point() +
+    geom_boxplot(fill = NA, outlier.color = NA) +
+    scale_y_log10() +
+    facet_wrap(. ~ domain) +
+    theme_minimal()
+```
+
+Check how well estimates agree with real species counts, per marker gene.
+
+```{r, fig.width=8, fig.height=8}
+collect.rarefaction %>%
+  filter(cutoff == "965") %>%
+  left_join(lm.cluster_species) %>%
+  mutate(predicted = n.cluster * estimate) %>%
+  group_by(source, marker_id, cutoff) %>%
+  summarise(cor = cor(n.species, predicted)) %>% #arrange(cor)
+  ggplot(aes(y = 1 - cor, x = source, colour = source, group = source, fill = source)) +
+    geom_boxplot(colour = "darkgrey", outlier.colour = NA, alpha = 0.2) +
+    geom_point(position = position_jitterdodge()) +
+    scale_y_sqrt() + 
+    ylab("1 - cor(observed versus predicted species counts)") +
+    scale_colour_brewer(palette = "Paired") +
+    scale_fill_brewer(palette = "Paired") +
+    theme_minimal()
+```
+
+
+
+---
