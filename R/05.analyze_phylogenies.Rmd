@@ -1,0 +1,782 @@
+---
+title: "Census of discoverable diversity: Analyses"
+author: "Vishnu Prasoodanan, Oleks Maistrenko & Sebastian Schmidt"
+date: "2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(stringsAsFactors = FALSE)
+```
+
+## Prepare environment
+
+```{r}
+library(tidyverse)
+library(extrafont)
+library(ape)
+library(phytools)
+library(phangorn)
+library(castor)
+
+extrafont::loadfonts()
+```
+
+Set paths and parameters.
+
+```{r}
+#Preallocate global data structures
+PARAM <- list()
+
+#Set relevant folder names
+PARAM$folder.Rmd <- paste0(getwd(), "/")
+PARAM$folder.base <- gsub("Rmd/", "", PARAM$folder.Rmd)
+PARAM$folder.data <- paste0(PARAM$folder.base, "data/")
+PARAM$folder.data.rarefaction <- paste0(PARAM$folder.data, "hmm_gtdb.clustering/")
+```
+
+Plotting colours.
+
+```{r}
+col.pg3 <-   "#1F78B4"
+col.gtdb <-   "#A6CEE3"
+col.spire.mag <- "#FDBF6F"
+col.unbinned.non_singleton <- "#FFE206"
+col.unbinned <-  "#ffffb3"
+```
+
+## Read data
+
+Load sample metadata.
+
+```{r}
+PARAM$file.sample_data <- paste0(PARAM$folder.base, "metadata/data.sample.clean.Rdata")
+load(PARAM$file.sample_data)
+```
+
+Load HMM data.
+
+```{r}
+PARAM$file.hmm <-  paste0(PARAM$folder.data, "dat.hmm.gtdb_207.Rdata")
+load(PARAM$file.hmm)
+```
+
+
+Get a list of marker genes that are "redundant" (i.e., used in both the bacterial and archaeal domain).
+
+```{r}
+dat.hmm %>%
+  group_by(marker_id) %>%
+  tally() %>%
+  filter(n > 1) %>%
+  pull(marker_id) -> drop.redundant.markers
+```
+
+Load clustering summary data
+
+```{r}
+PARAM$file.clustering.summary <- paste0(PARAM$folder.data, "00_SUMMARY.spire_gtdb.clustered.rarefaction.Rdata")
+load(PARAM$file.clustering.summary)
+```
+
+Prepare and re-categorize samples.
+
+```{r}
+order.by_h5 <- c(
+  "human gut (adult, healthy)",
+  "human gut (adult, diseased)",
+  "human gut (non-industrialized)",
+  "human gut (infant)",
+  "human gut (child)",
+  "human gut (elderly)",
+  "pig gut",
+  "bovine gut",
+  "mammalian gut (other)",
+  "rumen",
+  "bird gut",
+  "animal gut (other)",
+  "human oral",
+  "human skin",
+  "human airways",
+  "human urogenital",
+  "human (other)",
+  "built environment",
+  "wastewater",
+  "rhizosphere",
+  "phyllosphere",
+  "plant host (other)",
+  "soil",
+  "wetland",
+  "marine",
+  "fresh water",
+  "groundwater",
+  "hot spring",
+  "hydrothermal vent",
+  "aquatic (other)",
+  "air",
+  "other"
+)
+
+dat.sample.rarefy <- dat.sample.clean
+```
+
+# RED-based analyses
+
+## Load data
+
+Loop through marker genes and load data.
+
+```{r}
+collect.convert_counts <- collect.clade_sizes <- tibble()
+
+for (file in list.files(PARAM$folder.data, pattern = "clade_counts_v3.tab")) {
+  marker_id <- file %>% str_remove("_convert.+")
+  
+  writeLines(paste(date(), "=>", marker_id))
+  
+  #Load clade counts
+  collect.convert_counts <- bind_rows(
+    collect.convert_counts,
+    read_tsv(paste0(PARAM$folder.data, file), show_col_types = F) %>%
+      mutate(marker_id = marker_id) %>%
+      select(marker_id, phylum, class, order, family, genus)
+  )
+  
+  #Load clade sizes
+  collect.clade_sizes <- bind_rows(
+    collect.clade_sizes,
+    read_tsv(paste0(PARAM$folder.data, marker_id, "_collect.clade_sizes_v3.tab"), show_col_types = F) %>%
+      group_by(level, node) %>%
+      summarise(
+        source = case_when(
+          sum(source == "pg3") > 0 ~ "pg3",
+          sum(source == "gtdb_r220") > 0 ~ "gtdb_r220",
+          sum(source == "spire.mag") > 0 ~ "spire.mag",
+          T ~ "spire.unbinned"
+        ),
+        size = sum(n)
+      ) %>%
+      ungroup() %>%
+      mutate(marker_id = marker_id) %>%
+      mutate(level = fct_relevel(level, "phylum", "class", "order", "family", "genus")) %>%
+      select(marker_id, level, node, source, size)
+  )
+}
+
+```
+
+## Analyze data
+
+Get n of tips in each tree.
+
+```{r, fig.height=6}
+#Find predicted total phyla for filtering
+use.marker_id.arch <- collect.clade_sizes %>%
+  filter(level == "phylum") %>%
+  group_by(marker_id) %>%
+  tally %>%
+  mutate(median.count = median(n)) %>%
+  filter(n >= 0.5 * median.count & n <= 2 * median.count) %>%
+  filter(! marker_id %in% c(
+    "TIGR00111",
+    "PF01280.21"
+  )) %>%
+  pull(marker_id)
+
+collect.tree_sizes <- collect.clade_sizes %>%
+  filter(marker_id %in% use.marker_id.arch) %>%
+  filter(level == "phylum") %>%
+  group_by(marker_id) %>%
+  summarise(n.tips = sum(size)) %>%
+  filter(n.tips <= 2 * median(n.tips) & n.tips >= 0.5 * median(n.tips)) %>%
+  mutate(
+    conversion.tree_size = n.tips / median(n.tips)
+  )
+
+collect.tree_sizes %>%
+  arrange(desc(n.tips)) %>%
+  mutate(marker_id = fct_relevel(marker_id, marker_id)) %>%
+  ggplot(aes(x = n.tips, y = marker_id)) +
+  geom_vline(aes(xintercept = mean(n.tips))) +
+  geom_vline(aes(xintercept = median(n.tips)), colour = "green") +
+  geom_point() +
+  theme_minimal()
+```
+
+First, go for clade counts only, with and without normalization.
+
+```{r, fig.width=12, fig.height=8}
+proc.clade_sizes <- collect.clade_sizes %>%
+  filter(marker_id %in% use.marker_id.arch) %>%
+  group_by(marker_id, level, source) %>%
+  summarise(
+    n = n(),
+    n.tips = sum(size)
+  ) %>%
+  ungroup() %>%
+  left_join(
+    collect.convert_counts %>%
+      pivot_longer(phylum:genus, names_to = "level", values_to = "conversion"),
+    by = c("marker_id", "level")
+  ) %>%
+  left_join(collect.tree_sizes, by = "marker_id", suffix = c("", ".full")) %>%
+  mutate(
+    n.adj = n / conversion,
+    n.adj.n_tips = n / conversion.tree_size,
+    source = fct_relevel(source, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned"))),
+    level = fct_relevel(level, "phylum", "class", "order", "family", "genus")
+  ) %>%
+  #Reorder labels within levels
+  group_by(marker_id, level) %>%
+  mutate(n.tot = sum(n)) %>%
+  ungroup() %>%
+  mutate(marker_id.reordered = tidytext::reorder_within(marker_id, desc(n.tot), within = level))
+
+proc.clade_sizes %>%
+  ggplot(aes(x = n, y = marker_id, fill = source)) +
+  geom_bar(stat = "identity") +
+  #Add lines indicating GTDB r220 reference clade counts
+  geom_vline(
+    data = tibble(
+      #Clade counts from GTDB r220
+      n = c(19, 64, 166, 564, 1847),
+      level = c("phylum", "class", "order", "family", "genus")
+    ) %>%
+       mutate(level = fct_relevel(level, "phylum", "class", "order", "family", "genus")),
+    aes(xintercept = n),
+    colour = "darkgrey",
+    linetype = "dashed"
+  ) +
+  #Add lines indicating median counts
+  geom_vline(
+    data = . %>%
+      select(marker_id, level, source, n) %>%
+      pivot_wider(values_from = n, names_from = source) %>%
+      mutate(gtdb_r220 = pg3 + gtdb_r220) %>%
+      mutate(spire.mag = gtdb_r220 + spire.mag) %>%
+      mutate(spire.unbinned = spire.mag + spire.unbinned) %>%
+      pivot_longer(c(pg3, gtdb_r220, spire.mag, spire.unbinned), names_to = "source", values_to = "n") %>%
+      group_by(level, source) %>%
+      summarise(n = median(n)) %>%
+      ungroup() %>%
+      mutate(source = fct_relevel(source, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned")))),
+    aes(xintercept = n, colour = source)
+  ) +
+  xlab("number of predicted clades") +
+  ylab("marker gene") +
+  scale_color_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton))) +
+  scale_fill_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton))) +
+  facet_wrap(. ~ level, scales = "free_x", nrow = 1) +
+  theme_minimal() +
+  theme(
+    legend.position = "none"
+  )
+```
+
+Explore the habitat "occupancy" of clades at each level.
+
+```{r, fig.width=8, fig.height=6}
+tot.clade_sizes <- collect.clade_sizes %>%
+  group_by(marker_id, level) %>%
+  summarise(n.total = n())
+
+tot.clade_sizes.summarised <- collect.clade_sizes %>%
+  group_by(marker_id, source, level) %>%
+  summarise(n.total = n()) %>%
+  filter(marker_id %in% collect.h5_counts$marker_id) %>%
+  group_by(source, level) %>%
+  summarise(count = mean(n.total))
+
+tot.clade_sizes.summarised.for_plotting <- tot.clade_sizes.summarised %>%
+  pivot_wider(names_from = source, values_from = count) %>%
+  mutate(
+    pg3__bl = 0,
+    gtdb_r220__bl = pg3,
+    spire.mag__bl = pg3 + gtdb_r220,
+    spire.unbinned__bl = pg3 + gtdb_r220 + spire.mag,
+    pg3__ceil = pg3,
+    gtdb_r220__ceil = pg3 + gtdb_r220,
+    spire.mag__ceil = pg3 + gtdb_r220 + spire.mag,
+    spire.unbinned__ceil = pg3 + gtdb_r220 + spire.mag + spire.unbinned
+  ) %>%
+  select(level, pg3__bl:spire.unbinned__ceil) %>%
+  pivot_longer(pg3__bl:spire.unbinned__ceil) %>%
+  separate(name, sep = "__", into = c("source", "limit")) %>%
+  pivot_wider(names_from = "limit", values_from = "value")
+
+#Make plot
+p.clades.by_h5.arch <- collect.h5_counts %>%
+  filter(marker_id %in% collect.h5_counts$marker_id) %>%
+  left_join(tot.clade_sizes, by = c("marker_id", "level")) %>%
+  mutate(prevalence = n / n.total) %>%
+  group_by(level, h5, source) %>%
+  summarise(
+    prevalence = mean(prevalence),
+    count = mean(prevalence) * mean(n.total)
+  ) %>%
+  ungroup() %>%
+  left_join(tot.clade_sizes.summarised.for_plotting, by = c("level", "source")) %>%
+  mutate(count.adj = count + bl) %>%
+  bind_rows(
+    tot.clade_sizes.summarised.for_plotting %>%
+      mutate(h5 = "all") %>%
+      rename(count.adj = ceil)
+  ) %>%
+  mutate(h5 = fct_relevel(h5, c("all", levels(collect.h5_counts$h5)))) %>%
+  mutate(level = fct_relevel(level, "phylum", "class", "order", "family", "genus")) %>%
+  mutate(source = fct_relevel(source, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned")))) %>%
+  mutate(
+    xmin = as.numeric(h5) - 0.5,
+    xmax = as.numeric(h5) + 0.5
+  ) %>%
+  filter(level %in% c("phylum", "genus")) %>%
+  filter(!is.na(h5)) %>%
+  #Plot
+  ggplot(aes(x = h5, y = count.adj, ymin = bl, group = source, fill = source)) +
+  #Add low-opacity background shading rectangles
+  geom_rect(
+    data = tot.clade_sizes.summarised.for_plotting %>%
+      mutate(source = fct_relevel(source, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned")))) %>%
+      filter(level %in% c("phylum", "genus")),
+    aes(x = 34, xmin = 0.5, xmax = 33.5, y = ceil, ymin = bl, ymax = ceil, fill = source),
+    alpha = 0.1
+  ) +
+  #Mark borders between sources
+  geom_hline(
+    data = tot.clade_sizes.summarised.for_plotting %>%
+      mutate(source = fct_relevel(source, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned")))) %>%
+      filter(level %in% c("phylum", "genus")),
+    aes(yintercept = ceil, colour = source),
+    linetype = "dashed"
+  ) +
+  #Add data series
+  geom_rect(
+    aes(xmin = xmin, xmax = xmax, ymax = count.adj)
+  ) +
+  #Adjust scales
+  scale_fill_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton))) +
+  scale_colour_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton))) +
+  scale_x_discrete(guide = guide_axis(angle = -45), position = "top") +
+  ylab("number of detected clade-level groups") +
+  #scale_size(range = c(0,6)) +
+  #Grid by taxonomic resolution
+  facet_grid(level ~ ., scales = "free_y") +
+  #Prettify
+  theme_minimal(base_family = "Avenir Next", base_size = 8) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "darkgrey"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.text = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_text(family = "Avenir Next", size = 8, colour = "#252525")
+  ) +
+  NULL
+p.clades.by_h5.arch
+
+ggsave(
+  p.clades.by_h5.arch,
+  filename = paste0(PARAM$folder.base, "results/clade_counts.by_h5.pdf"),
+  width = 90,
+  height = 60,
+  unit = "mm",
+  device = cairo_pdf
+)
+```
+
+Repeat for Bacteria.
+
+Get n of tips in each tree.
+
+```{r, fig.height=12}
+collect.tree_sizes <- collect.clade_sizes.bac %>%
+  filter(level == "phylum") %>%
+  group_by(marker_id) %>%
+  summarise(n.tips = sum(size)) %>%
+  filter(n.tips <= 2 * median(n.tips) & n.tips >= 0.5 * median(n.tips)) %>%
+  mutate(
+    conversion.tree_size = n.tips / median(n.tips)
+  )
+
+collect.tree_sizes %>%
+  arrange(desc(n.tips)) %>%
+  mutate(marker_id = fct_relevel(marker_id, marker_id)) %>%
+  ggplot(aes(x = n.tips, y = marker_id)) +
+  geom_vline(aes(xintercept = mean(n.tips))) +
+  geom_vline(aes(xintercept = median(n.tips)), colour = "green") +
+  geom_point() +
+  theme_minimal()
+```
+
+First, go for clade counts only, with and without normalization.
+
+```{r, fig.width=12, fig.height=12}
+#Find predicted total phyla for filtering
+use.marker_id <- collect.clade_sizes.bac %>%
+  filter(level == "phylum") %>%
+  #filter(source %in% c("pg3", "gtdb_r220")) %>%
+  group_by(marker_id) %>%
+  tally %>%
+  mutate(median.count = median(n)) %>%
+  #Filter marker genes (in addition to manual filters based on curation applied upstream)
+  filter(n >= 0.5 * median.count & n <= 2 * median.count) %>%
+  pull(marker_id)
+
+proc.clade_sizes <- collect.clade_sizes.bac %>%
+  filter(marker_id %in% use.marker_id) %>%
+  group_by(marker_id, level, source) %>%
+  summarise(
+    n = n(),
+    n.tips = sum(size)
+  ) %>%
+  ungroup() %>%
+  left_join(
+    collect.convert_counts %>%
+      pivot_longer(phylum:genus, names_to = "level", values_to = "conversion"),
+    by = c("marker_id", "level")
+  ) %>%
+  left_join(collect.tree_sizes, by = "marker_id", suffix = c("", ".full")) %>%
+  mutate(
+    n.adj = n / conversion,
+    n.adj.n_tips = n / conversion.tree_size,
+    source = fct_relevel(source, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned"))),
+    level = fct_relevel(level, "phylum", "class", "order", "family", "genus")
+  ) %>%
+  #Reorder labels within levels
+  group_by(marker_id, level) %>%
+  mutate(n.tot = sum(n)) %>%
+  ungroup() %>%
+  mutate(marker_id.reordered = tidytext::reorder_within(marker_id, desc(n.tot), within = level))
+
+proc.clade_sizes %>%
+  ggplot(aes(x = n, y = marker_id, fill = source)) +
+  geom_bar(stat = "identity") +
+  #Add lines indicating GTDB r220 reference clade counts
+  geom_vline(
+    data = tibble(
+      #Clade counts from GTDB r220
+      n = c(175, 538, 1840, 4870, 23112),
+      level = c("phylum", "class", "order", "family", "genus")
+    ) %>%
+       mutate(level = fct_relevel(level, "phylum", "class", "order", "family", "genus")),
+    aes(xintercept = n),
+    colour = "darkgrey",
+    linetype = "dashed"
+  ) +
+  #Add lines indicating median counts
+  geom_vline(
+    data = . %>%
+      select(marker_id, level, source, n) %>%
+      pivot_wider(values_from = n, names_from = source) %>%
+      mutate(gtdb_r220 = pg3 + gtdb_r220) %>%
+      mutate(spire.mag = gtdb_r220 + spire.mag) %>%
+      mutate(spire.unbinned = spire.mag + spire.unbinned) %>%
+      pivot_longer(c(pg3, gtdb_r220, spire.mag, spire.unbinned), names_to = "source", values_to = "n") %>%
+      group_by(level, source) %>%
+      summarise(n = median(n)) %>%
+      ungroup() %>%
+      mutate(source = fct_relevel(source, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned")))),
+    aes(xintercept = n, colour = source)
+  ) +
+  xlab("number of predicted clades") +
+  ylab("marker gene") +
+  scale_color_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton))) +
+  scale_fill_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton))) +
+  facet_wrap(. ~ level, scales = "free_x", nrow = 1) +
+  theme_minimal() +
+  theme(
+    legend.position = "none"
+  )
+```
+
+Export table with estimated clade counts.
+
+```{r}
+res.clade_counts <- collect.clade_sizes.bac %>%
+  filter(marker_id %in% use.marker_id) %>%
+  mutate(domain = "Bacteria") %>%
+  bind_rows(
+    collect.clade_sizes %>%
+    filter(marker_id %in% use.marker_id.arch) %>%
+    mutate(domain = "Archaea")
+  ) %>%
+  group_by(domain, marker_id, level, source) %>%
+  tally %>%
+  ungroup() %>%
+  pivot_wider(names_from = "source", values_from = "n", values_fill = 0) %>%
+  mutate(ref = pg3 + gtdb_r220) %>%
+  select(domain, marker_id, level, ref, spire.mag, spire.unbinned) %>%
+  pivot_longer(ref:spire.unbinned, names_to = "source", values_to = "n") %>%
+  mutate(
+    level = fct_relevel(level, c("phylum", "class", "order", "family", "genus")),
+    source = fct_relevel(source, c("ref", "spire.mag", "spire.unbinned"))
+  )
+
+tab.clade_counts <- res.clade_counts %>%
+  group_by(domain, level, source) %>%
+  summarise(
+    median = round(median(n, na.rm=T)),
+    sd = round(sd(n, na.rm = T))
+  ) %>%
+  ungroup() %>%
+  arrange(domain, level, source) %>%
+  mutate(number_of_clades = str_c(median, " ± ", sd)) %>%
+  select(domain, level, source, number_of_clades) %>%
+  pivot_wider(names_from = "level", values_from = "number_of_clades")
+tab.clade_counts
+```
+
+Plot estimated clade counts.
+
+```{r}
+p.clade_counts <- res.clade_counts %>%
+  ggplot(aes(x = source, y = n, fill = source)) +
+  #Add reference hlines
+  geom_hline(
+    data = bind_rows(
+      tibble(
+        domain = "Archaea",
+        n = c(1, 100, 1000)
+      ),
+      tibble(
+        domain = "Bacteria",
+        n = c(1, 10, 100, 1000, 10000)
+      )
+    ),
+    aes(yintercept = n),
+    colour = "darkgrey",
+    linewidth = 0.1
+  ) +
+  #Add boxplot
+  geom_boxplot(aes(group = source), fill = NA, outlier.colour = NA, colour = "#525252", linewidth = 0.4) +
+  #Add data series
+  geom_point(
+    position = position_jitterdodge(),
+    shape = 21,
+    size = 1.2,
+    linewidth = 0.01,
+    colour = "#737373",
+  ) +
+  #Add ref lines for GTDB
+  geom_hline(
+    data = bind_rows(
+      tibble(
+        domain = "Archaea",
+        level = c("phylum", "class", "order", "family", "genus"),
+        n = c(19, 64, 166, 564, 1847)
+      ),
+      tibble(
+        domain = "Bacteria",
+        level = c("phylum", "class", "order", "family", "genus"),
+        n = c(175, 538, 1840, 4870, 23112)
+      )
+    ) %>%
+      mutate(level = fct_relevel(level, c("phylum", "class", "order", "family", "genus"))),
+    aes(yintercept = n),
+    colour = col.gtdb,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  scale_fill_manual(values = c(col.gtdb, col.spire.mag, col.unbinned.non_singleton)) +
+  scale_y_continuous(
+    trans = "log10",
+    breaks = rep(1:9, each = 5) * c(1, 10, 100, 1000, 10000)
+  ) +
+  facet_grid(
+    domain ~ level,
+    scales = "free_y",
+    switch = "both",
+    #nrow = 2
+  ) +
+  ylab("number of predicted clades") +
+  #Prettify
+  theme_minimal(base_family = "Avenir Next", base_size = 8) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "lightgrey"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_blank()
+  ) +
+  NULL
+p.clade_counts
+
+ggsave(
+  p.clade_counts,
+  filename = paste0(PARAM$folder.base, "results/clade_counts.overview_both.pdf"),
+  width = 90,
+  height = 85,
+  unit = "mm",
+  scale = 1,
+  device = cairo_pdf
+)
+```
+
+Plot per-habitat overview, combined for Archaea and Bacteria.
+
+```{r, fig.width=8, fig.height=6}
+use.h5 <- c(
+  "all",
+  "human gut (adult, healthy)",
+  "human gut (non-industrialized)",
+  "human gut (infant)",
+  "pig gut",
+  "bovine gut",
+  "mammalian gut (other)",
+  "rumen",
+  "animal gut (other)",
+  "human oral",
+  "human skin",
+  "human airways",
+  "human urogenital",
+  "built environment",
+  "wastewater",
+  "rhizosphere",
+  "phyllosphere",
+  "soil",
+  "wetland",
+  "marine",
+  "fresh water",
+  "groundwater",
+  "hot spring",
+  "hydrothermal vent",
+  "aquatic (other)",
+  "other"
+)
+
+#Consolidate habitat mapping data
+p.clades.by_h5.all <- collect.h5_counts.bac %>%
+  mutate(domain = "Bacteria") %>%
+  #Summarise by habitat and (predicted) clade
+  select(domain, marker_id, level, node, h5) %>%
+  distinct() %>%
+  left_join(collect.clade_sizes.bac, by = c("marker_id", "level", "node")) %>%
+  #Count predicted clades per marker gene and habitat
+  group_by(domain, marker_id, level, source, h5) %>%
+  tally %>%
+  #Merge archaeal data
+  bind_rows(
+    collect.h5_counts %>% filter(marker_id %in% use.marker_id.arch) %>% mutate(domain = "Archaea")
+  ) %>%
+  #Count prevalence of predicted clades across habitat
+  left_join(tot.clade_sizes.by_source %>% ungroup(), by = c("domain", "marker_id", "source", "level")) %>%
+  mutate(prevalence = n / n.total) %>%
+  group_by(domain, level, h5, source) %>%
+  #Normalize by total clade counts
+  summarise(
+    prevalence = mean(prevalence, na.rm=T),
+    count = mean(prevalence, na.rm=T) * median(n.total, na.rm=T)
+  ) %>%
+  ungroup() %>%
+  left_join(tot.clade_sizes.summarised.for_plotting, by = c("domain", "level", "source")) %>%
+  mutate(count.adj = count + bl) %>%
+  #Add global counts
+  bind_rows(
+    tot.clade_sizes.summarised.for_plotting %>%
+      mutate(h5 = "all") %>%
+      rename(count.adj = ceil)
+  ) %>%
+  #Re-adjust levels of relevant factors
+  filter(!is.na(h5)) %>%
+  filter(h5 %in% use.h5) %>%
+  mutate(h5 = droplevels(fct_relevel(h5, c("all", levels(collect.h5_counts$h5))))) %>%
+  mutate(level = fct_relevel(level, "phylum", "class", "order", "family", "genus")) %>%
+  mutate(source = fct_relevel(source, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned")))) %>%
+  mutate(
+    xmin = as.numeric(h5) - 0.5,
+    xmax = as.numeric(h5) + 0.5
+  ) %>%
+  filter(level %in% c("phylum", "genus")) %>%
+  #Plot
+  ggplot(aes(x = h5, y = count.adj, ymin = bl, group = source, fill = source)) +
+  #Add low-opacity background shading rectangles
+  geom_rect(
+    data = tot.clade_sizes.summarised.for_plotting %>%
+      mutate(source = fct_relevel(source, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned")))) %>%
+      filter(level %in% c("phylum", "genus")),
+    aes(x = length(use.h5), xmin = 0.5, xmax = length(use.h5) + 0.5, y = ceil, ymin = bl, ymax = ceil, fill = source),
+    alpha = 0.1
+  ) +
+  #Add data series
+  geom_rect(
+    aes(xmin = xmin, xmax = xmax, ymax = count.adj),
+    colour = "darkgrey",
+    linewidth = 0.1
+  ) +
+  #Mark borders between sources
+  geom_hline(
+    data = tot.clade_sizes.summarised.for_plotting %>%
+      mutate(source = fct_relevel(source, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned")))) %>%
+      filter(level %in% c("phylum", "genus")),
+    aes(yintercept = ceil, colour = source),
+    linetype = "dashed",
+    linewidth = 0.1
+  ) +
+  #Adjust scales
+  scale_fill_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton))) +
+  scale_colour_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton))) +
+  scale_x_discrete(guide = guide_axis(angle = -45), position = "top") +
+  #scale_y_continuous(trans = "sqrt") +
+  ylab("number of detected clade-level groups") +
+  #Grid by taxonomic resolution
+  facet_grid(domain + level ~ ., scales = "free_y") +
+  #Prettify
+  theme_minimal(base_family = "Avenir Next", base_size = 8) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "darkgrey"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.text = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_blank(),
+  ) +
+  NULL
+p.clades.by_h5.all
+  
+ggsave(
+  p.clades.by_h5.all,
+  filename = paste0(PARAM$folder.base, "results/clade_counts.by_h5.all.pdf"),
+  width = 90,
+  height = 90,
+  unit = "mm",
+  device = cairo_pdf
+)
+```
+
+# Export sample data table
+
+```{r}
+dat.sample.clean %>%
+  filter(sample_id %in% dat.sample.rarefy$sample_id) %>%
+  select(sample_id, ena_ers_sample_id, study_id, `age group:adolescent`:`terrestrial:wetland:salt marsh`) %>%
+  left_join(dat.sample.rarefy %>% select(sample_id, h5), by = "sample_id") %>%
+  rename(spire_sample_id = sample_id) %>%
+  relocate(spire_sample_id, ena_ers_sample_id, study_id, h5) %>%
+  pivot_longer(`age group:adolescent`:`terrestrial:wetland:salt marsh`) %>%
+  filter(value) %>%
+  mutate(
+    name2 = str_remove(name, ".+:")
+  ) %>%
+  select(-name) %>%
+  select(-value) %>%
+  group_by(spire_sample_id, ena_ers_sample_id, study_id, h5) %>%
+  summarise(microntology = str_c(name2, collapse = ";")) %>%
+  ungroup() %>%
+  arrange(study_id, spire_sample_id) %>%
+  rename(habitat_category = h5) %>% write_tsv(file = "~/Desktop/table.S2.sample_metadata.tsv")
+
+```
+
+
+
+
+----
+
+

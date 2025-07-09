@@ -1,0 +1,1309 @@
+---
+title: "Census of discoverable diversity: Analyses"
+author: "Vishnu Prasoodanan, Oleks Maistrenko & Sebastian Schmidt"
+date: "2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(stringsAsFactors = FALSE)
+```
+
+## Prepare environment
+
+```{r}
+library(tidyverse)
+library(extrafont)
+extrafont::loadfonts()
+```
+
+Set paths and parameters.
+
+```{r}
+#Preallocate global data structures
+PARAM <- list()
+
+#Set relevant folder names
+PARAM$folder.Rmd <- paste0(getwd(), "/")
+PARAM$folder.base <- gsub("Rmd/", "", PARAM$folder.Rmd)
+PARAM$folder.data <- paste0(PARAM$folder.base, "data/")
+PARAM$folder.data.rarefaction <- paste0(PARAM$folder.data, "hmm_gtdb.clustering/")
+PARAM$file.meta.arch <- paste0(PARAM$folder.data, "hmm_gtdb207/ar53_msa_marker_info.tsv")
+PARAM$file.meta.bac <- paste0(PARAM$folder.data, "hmm_gtdb207/bac120_msa_marker_info.tsv")
+```
+
+Plotting colours.
+
+```{r}
+col.pg3 <-   "#1F78B4"
+col.gtdb <-   "#A6CEE3"
+col.spire.mag <- "#FDBF6F"
+col.unbinned.non_singleton <- "#FFE206"
+col.unbinned <-  "#ffffb3"
+```
+
+## Read data
+
+Load sample metadata.
+
+```{r}
+PARAM$file.sample_data <- paste0(PARAM$folder.base, "metadata/data.sample.clean.Rdata")
+load(PARAM$file.sample_data)
+```
+
+Load HMM data.
+
+```{r}
+PARAM$file.hmm <-  paste0(PARAM$folder.data, "dat.hmm.gtdb_207.Rdata")
+load(PARAM$file.hmm)
+```
+
+
+Get a list of marker genes that are "redundant" (i.e., used in both the bacterial and archaeal domain).
+
+```{r}
+dat.hmm %>%
+  group_by(marker_id) %>%
+  tally() %>%
+  filter(n > 1) %>%
+  pull(marker_id) -> drop.redundant.markers
+```
+
+Load clustering summary data
+
+```{r}
+PARAM$file.clustering.summary <- paste0(PARAM$folder.data, "00_SUMMARY.spire_gtdb.clustered.rarefaction.Rdata")
+load(PARAM$file.clustering.summary)
+```
+
+# Analyse clustering data
+
+For every environment of interest:
+* loop through clusters
+* perform rarefactions
+* estimate n of species
+* stratify by source
+
+First, prepare and re-categorize samples.
+
+```{r}
+order.by_h5 <- c(
+  "human gut (adult, healthy)",
+  "human gut (adult, diseased)",
+  "human gut (non-industrialized)",
+  "human gut (infant)",
+  "human gut (child)",
+  "human gut (elderly)",
+  "pig gut",
+  "bovine gut",
+  "mammalian gut (other)",
+  "rumen",
+  "bird gut",
+  "animal gut (other)",
+  "human oral",
+  "human skin",
+  "human airways",
+  "human urogenital",
+  "human (other)",
+  "built environment",
+  "wastewater",
+  "rhizosphere",
+  "phyllosphere",
+  "plant host (other)",
+  "soil",
+  "wetland",
+  "marine",
+  "fresh water",
+  "groundwater",
+  "hot spring",
+  "hydrothermal vent",
+  "aquatic (other)",
+  "air",
+  "other"
+)
+
+dat.sample.rarefy <- dat.sample.clean
+```
+
+# Analyse clustering data
+
+Consolidate per-habitat rarefaction results across marker genes.
+
+```{r}
+curr.files <- list.files(PARAM$folder.data.rarefaction, full.names = T)
+
+res.rarefaction.by_sample <- res.baseline.by_sample <- tibble()
+for (f in curr.files) {
+  if (grepl("incremental", f)) {next()}
+  if (grepl("rarefaction.by_habitat.Rdata", f)) {next()}
+  
+  writeLines(f)
+  
+  load(f)
+  
+  res.rarefaction.by_sample <- bind_rows(
+    res.rarefaction.by_sample,
+    collect.rarefaction.by_sample
+  )
+  
+  res.baseline.by_sample <- bind_rows(
+    res.baseline.by_sample,
+    collect.baseline
+  )
+}
+```
+
+Consolidate incremental rarefaction results across marker genes.
+
+```{r}
+curr.files <- list.files(PARAM$folder.data.rarefaction, full.names = T, pattern = "incremental")
+
+res.rarefaction.incremental <- res.baseline.incremental <- tibble()
+for (f in curr.files) {
+  if (grepl("rarefaction.by_habitat.incremental.Rdata", f)) {next()}
+  
+  writeLines(f)
+  
+  load(f)
+  
+  res.rarefaction.incremental <- bind_rows(
+    res.rarefaction.incremental,
+    collect.rarefaction.by_habitat_increment
+  )
+  
+  res.baseline.incremental <- bind_rows(
+    res.baseline.incremental,
+    collect.baseline
+  )
+}
+```
+
+Generate figure S1: overview of species count estimates across all marker genes
+
+```{r, fig.width=8, fig.height=8}
+p.marker_estimates <- res.baseline.incremental %>%
+  #filter(marker_id %in% use.marker_id$marker_id) %>%
+  filter(!marker_id %in% drop.redundant.markers) %>%
+  pivot_longer(n.pg3:n.spire.mag.unique) %>%
+  filter(name %in% c("n.pg3", "n.gtdb_r220", "n.spire.mag")) %>%
+  mutate(
+    use.model = case_when(
+      grepl("pg3", name) ~ "pg3",
+      grepl("gtdb_", name) ~ "gtdb_r220",
+      T ~ "spire.ani_cluster"
+    )
+  ) %>%
+  left_join(lm.cluster_species %>% select(marker_id, cutoff, source, estimate), by = c("marker_id" = "marker_id", "cutoff" = "cutoff", "use.model" = "source")) %>%
+  left_join(dat.hmm %>% select(marker_id, domain), by = "marker_id") %>%
+  mutate(n.species = value * estimate) %>%
+  mutate(name = str_remove(name, "n.")) %>%
+  mutate(name = fct_relevel(name, c("pg3", "gtdb_r220", "spire.mag"))) %>%
+  group_by(name, domain) %>%
+  mutate(n.species.norm = log2(n.species / median(n.species))) %>%
+  ggplot(aes(x = name, y = n.species.norm, colour = name, fill = name)) +
+  geom_boxplot(fill = NA, colour = "grey", outlier.colour = NA) +
+  geom_point(shape = 21, colour = "grey", position = position_jitterdodge(), size = 2) +
+  geom_hline(yintercept = c(log2(0.8), log2(1.2)), colour = "darkgrey") +
+  scale_fill_manual(values = c(col.pg3, col.gtdb, col.spire.mag)) +
+  ylab("estimated n of species, normalized by median") +
+  facet_grid(. ~ domain, scales = "free", space = "free_y") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(family = "Avenir Next"),
+    axis.text = element_text(family = "Avenir Next"),
+    strip.text = element_text(family = "Avenir Next")
+  ) +
+  NULL
+p.marker_estimates
+
+ggsave(p.marker_estimates, file = paste0(PARAM$folder.base, "manuscript/figure_S1.pdf"), device = cairo_pdf, width = 180, height = 180, unit = "mm")
+```
+
+Define set(s) of marker genes to use, prefiltered here based on deviation from median estimates (additional manual filters due to issues upon curation added elsewhere)
+
+```{r, fig.width=8, fig.height=8}
+use.marker_id <- res.baseline.incremental %>%
+  filter(!marker_id %in% drop.redundant.markers) %>%
+  pivot_longer(n.pg3:n.spire.mag.unique) %>%
+  mutate(
+    use.model = case_when(
+      grepl("pg3", name) ~ "pg3",
+      grepl("gtdb_", name) ~ "gtdb_r220",
+      T ~ "spire.ani_cluster"
+    )
+  ) %>%
+  left_join(lm.cluster_species %>% select(marker_id, cutoff, source, estimate), by = c("marker_id" = "marker_id", "cutoff" = "cutoff", "use.model" = "source")) %>%
+  mutate(n.species = value * estimate) %>%
+  left_join(dat.hmm %>% select(marker_id, domain, length_aa), by = "marker_id") %>%
+  group_by(cutoff, domain, name) %>%
+  mutate(median = median(n.species)) %>%
+  ungroup() %>%
+  mutate(
+    within_20 = (n.species >= 0.8 * median) & (n.species <= 1.2 * median)
+  ) %>%
+  filter(within_20) %>%
+  filter(name %in% c("n.pg3", "n.gtdb_r220", "n.spire.mag")) %>%
+  group_by(marker_id, cutoff, domain) %>%
+  tally() %>%
+  filter(n > 1) %>%
+  ungroup()
+```
+
+## Rarefactions per habitat
+
+### Novel species discovered per sample added
+
+Prepare data:
+* select relevant columns
+* normalize via pre-fit, marker gene-specific conversion factors for `n.cluster` -> `n.species`
+
+```{r, fig.width=10, fig.height=10}
+#Baseline data
+proc.baseline <- res.baseline.by_sample %>%
+  #Get HMM info per marker_id
+  left_join(dat.hmm %>% select(marker_id, domain, length_aa), by = "marker_id") %>%
+  #Drop deviating marker genes
+  filter(marker_id %in% use.marker_id$marker_id) %>%
+  #Reshape data and transform n.cluster -> n.species with estimates specific for marker_id and for data source
+  select(domain, marker_id, cutoff, n.pg3, n.gtdb_r220.unique, n.spire.mag.unique) %>%
+  pivot_longer(n.pg3:n.spire.mag.unique) %>%
+  mutate(
+    use.model = case_when(
+      grepl("pg3", name) ~ "pg3",
+      grepl("gtdb_", name) ~ "gtdb_r220",
+      T ~ "spire.ani_cluster"
+    )
+  ) %>%
+  left_join(lm.cluster_species %>% select(marker_id, cutoff, source, estimate), by = c("marker_id" = "marker_id", "cutoff" = "cutoff", "use.model" = "source")) %>%
+  mutate(n.species = value * estimate) %>%
+  #Re-calculate baselines as "composites" of the various values
+  select(domain:name, n.species) %>%
+  pivot_wider(names_from = "name", values_from = "n.species") %>%
+  mutate(
+    pg3 = n.pg3,
+    gtdb_r220 = n.pg3 + n.gtdb_r220.unique,
+    spire.mag = n.pg3 + n.gtdb_r220.unique + n.spire.mag.unique
+  ) %>%
+  #Summarise across marker genes and re-organise
+  select(domain:cutoff, pg3:spire.mag) %>%
+  pivot_longer(pg3:spire.mag) %>%
+  group_by(domain, name) %>%
+  summarise(
+    median = median(value, na.rm=T),
+    mean = mean(value),
+    sd = sd(value)
+  ) %>%
+  mutate(name = fct_relevel(name, rev(c("pg3", "gtdb_r220", "spire.mag"))))
+
+#Actual gene cluster and inferred species counts from incremental rarefaction
+#=> for each data series, adjust values by respective baselines
+tmp <- res.rarefaction.by_sample %>%
+  #Get HMM info per marker_id
+  left_join(dat.hmm %>% select(marker_id, domain, length_aa), by = "marker_id") %>%
+  filter(marker_id %in% use.marker_id$marker_id) %>%
+  #Reshape data and transform n.cluster -> n.species with estimates specific for marker_id and for data source
+  select(domain, marker_id, cutoff, h5, step, i, glob.pg3, glob.gtdb_r220.unique, n.spire.mag, n.spire.unbinned.non_singleton.unique, n.spire.unbinned.unique) %>%
+  pivot_longer(glob.pg3:n.spire.unbinned.unique) %>%
+  mutate(
+    use.model = case_when(
+      grepl("pg3", name) ~ "pg3",
+      grepl("gtdb_", name) ~ "gtdb_r220",
+      T ~ "spire.ani_cluster"
+    )
+  ) %>%
+  left_join(lm.cluster_species %>% select(marker_id, cutoff, source, estimate), by = c("marker_id" = "marker_id", "cutoff" = "cutoff", "use.model" = "source")) %>%
+  mutate(n.species = value * estimate) %>%
+  #Re-calculate species estimates as "composites" of the various values
+  select(domain:name, n.species) %>%
+  pivot_wider(names_from = "name", values_from = "n.species")
+
+proc.rarefaction.all <- tmp %>%
+  #Summarise across iterations per marker gene
+  group_by(domain, marker_id, cutoff, h5, step) %>%
+  summarise(across(glob.pg3:n.spire.unbinned.unique, mean)) %>%
+  #Re-calculate composite values
+  mutate(
+    pg3 = glob.pg3,
+    gtdb_r220 = glob.pg3 + glob.gtdb_r220.unique,
+    spire.mag = glob.pg3 + glob.gtdb_r220.unique + n.spire.mag,
+    spire.unbinned.non_singleton = glob.pg3 + glob.gtdb_r220.unique + n.spire.mag + n.spire.unbinned.non_singleton.unique,
+    spire.unbinned = glob.pg3 + glob.gtdb_r220.unique + n.spire.mag + n.spire.unbinned.unique
+  ) %>%
+  #Get baseline counts and adjust accordingly
+  left_join(
+    proc.baseline %>%
+      select(domain, name, median) %>%
+      pivot_wider(names_from = name, values_from = median),
+    by = "domain",
+    suffix = c("", ".baseline")
+  ) %>%
+  ungroup() %>%
+  left_join(dat.h5.cat, by = "h5")
+
+proc.rarefaction.by_sample <- tmp %>%
+  #Summarise across iterations per marker gene
+  group_by(domain, marker_id, cutoff, h5, step) %>%
+  summarise(across(glob.pg3:n.spire.unbinned.unique, mean)) %>%
+  #Re-calculate composite values
+  mutate(
+    pg3 = glob.pg3,
+    gtdb_r220 = glob.pg3 + glob.gtdb_r220.unique,
+    spire.mag = glob.pg3 + glob.gtdb_r220.unique + n.spire.mag,
+    spire.unbinned.non_singleton = glob.pg3 + glob.gtdb_r220.unique + n.spire.mag + n.spire.unbinned.non_singleton.unique,
+    spire.unbinned = glob.pg3 + glob.gtdb_r220.unique + n.spire.mag + n.spire.unbinned.unique
+  ) %>%
+  #Summarise across marker genes per domain
+  group_by(domain, cutoff, h5, step) %>%
+  summarise(across(glob.pg3:spire.unbinned, median)) %>%
+  #Get baseline counts and adjust accordingly
+  left_join(
+    proc.baseline %>%
+      select(domain, name, median) %>%
+      pivot_wider(names_from = name, values_from = median),
+    by = "domain",
+    suffix = c("", ".baseline")
+  ) %>%
+  ungroup() %>%
+  left_join(dat.h5.cat, by = "h5")
+```
+
+Calculate n of novel species discovered per sample added, fit Heap's law and extract coefficients
+* per marker gene, summarised across iterations
+
+```{r}
+#Summarise as "new species discovered per sample added"
+#=> for calculations of alpha coefficients in Heap's law
+proc.rarefaction.heap <- tmp %>%
+  #Re-calculate composite values
+  mutate(
+    pg3 = glob.pg3,
+    gtdb_r220 = glob.pg3 + glob.gtdb_r220.unique,
+    spire.mag = glob.pg3 + glob.gtdb_r220.unique + n.spire.mag,
+    spire.unbinned.non_singleton = glob.pg3 + glob.gtdb_r220.unique + n.spire.mag + n.spire.unbinned.non_singleton.unique,
+    spire.unbinned = glob.pg3 + glob.gtdb_r220.unique + n.spire.mag + n.spire.unbinned.unique
+  ) %>%
+  #Summarise across iterations
+  group_by(domain, marker_id, cutoff, h5, step) %>%
+  summarise(across(glob.pg3:spire.unbinned, mean)) %>%
+  #Calculate delta of discovered species between steps
+  arrange(domain, marker_id, cutoff, h5, step) %>%
+  group_by(domain, marker_id, cutoff, h5) %>%
+  mutate(
+    step.diff = step - lag(step, default = 0)
+  ) %>%
+  mutate(
+    step.log = log(step.diff),
+    across(glob.pg3:spire.unbinned, ~ (log((.x - lag(.x, default = 0)) / step.diff)))
+  ) %>%
+  #Re-shape data for model fitting
+  select(domain:step, step.log, pg3:spire.unbinned) %>%
+  pivot_longer(pg3:spire.unbinned) %>%
+  #Drop negative and zero values
+  group_by(domain, marker_id, cutoff, h5, name) %>%
+  filter(!is.nan(value)) %>%
+  filter(value != -Inf) %>%
+  filter(n() >= 10) %>%
+  nest() %>%
+  mutate(
+    fit = purrr::map(data,~lm(value ~ step.log, data = .x))
+  ) %>%
+  mutate(
+    tidy.fit = purrr::map(fit, broom::tidy)
+  ) %>%
+  unnest(tidy.fit) %>%
+  select(-data) %>%
+  select(-fit) %>%
+  ungroup()
+```
+
+Get species discovered per sample added.
+
+```{r}
+proc.rarefaction.all %>%
+  select(domain, cutoff, marker_id, h5, h5.cat, step, pg3:spire.unbinned) %>%
+  group_by(domain, cutoff, marker_id, h5, h5.cat) %>%
+  slice_max(step) %>%
+  group_by(domain, cutoff, h5, h5.cat, step) %>%
+  summarise(across(pg3:spire.unbinned, median)) %>%
+  ungroup() %>%
+  pivot_longer(pg3:spire.unbinned) %>%
+  mutate(
+    h5.cat = case_when(
+      h5 == "all" ~ "all",
+      T ~ h5.cat
+    )
+  ) %>%
+  mutate(
+    h5 = fct_relevel(h5, c("all", levels(dat.sample.rarefy$h5))),
+    name = fct_relevel(name, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned.non_singleton", "spire.unbinned"))),
+    h5.cat = fct_relevel(h5.cat, c("all", "intestine", "human (other)", "anthropogenic", "plant-assoc.", "soil", "aquatic", "air", "other"))
+  ) %>%
+  filter(name %in% c("spire.unbinned")) %>%
+  group_by(h5, h5.cat, step, name) %>%
+  summarise(
+    species_per_step = sum(value) / first(step)
+  ) %>%
+  arrange(desc(species_per_step))
+```
+
+
+Plot rarefaction curves.
+
+S figure 2: rarefaction curves by habitat, Archaea.
+
+```{r, fig.width=16, fig.height=16}
+proc.rarefaction.all %>%
+  filter(domain == "Archaea") %>%
+  filter(h5 != "all") %>%
+  select(domain, cutoff, h5, h5.cat, step, pg3:spire.unbinned) %>%
+  group_by(domain, cutoff, h5, h5.cat, step) %>%
+  summarise(across(pg3:spire.unbinned, median)) %>%
+  ungroup() %>%
+  pivot_longer(pg3:spire.unbinned) %>%
+  mutate(
+    h5 = fct_relevel(h5, c("all", levels(dat.sample.rarefy$h5))),
+    name = fct_relevel(name, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned.non_singleton", "spire.unbinned"))),
+    h5.cat = fct_relevel(h5.cat, c("all", "intestine", "human (other)", "anthropogenic", "plant-assoc.", "soil", "aquatic", "air", "other"))
+  ) %>%
+  ggplot(
+    aes(
+      x = step,
+      y = value,
+      group = h5,
+      colour = name,
+      fill = name,
+      group = name
+    )
+  ) +
+  stat_smooth(se=FALSE, geom="area",
+              method = 'loess', alpha=1,
+              span = 0.8,aes(fill=name, group = interaction(name, h5))) +
+  xlab("number of samples") +
+  ylab("number of species discovered") +
+  scale_color_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  scale_fill_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  scale_x_continuous(breaks = c(seq(0, 5000, by = 1000), seq(10000, 20000, by = 5000)), position = "bottom", labels = c("0", paste0(c(seq(1, 5, by = 1), seq(10, 20, by = 5)), "k")), trans = "sqrt") +
+  scale_y_continuous(breaks = seq(0, 8000, by = 2000), position = "left", labels = c("0", paste0(seq(2, 8, by = 2), "k"))) +
+  xlab("n of samples") +
+  ylab("n of discovered species") +
+  #geom_point(aes(group = name)) +
+  #scale_x_sqrt() +
+  #scale_y_sqrt() +
+  facet_wrap(h5 ~ .) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.2, colour = "#d9d9d9"),
+    axis.title = element_text(family = "Avenir Next"),
+    axis.text = element_text(family = "Avenir Next"),
+    legend.text = element_text(family = "Avenir Next"),
+    legend.title = element_text(family = "Avenir Next"),
+    strip.text = element_text(family = "Avenir Next")
+  ) +
+  NULL -> p.rarefactiion.archaea.by_habitat
+p.rarefactiion.archaea.by_habitat
+
+ggsave(p.rarefactiion.archaea.by_habitat, file = paste0(PARAM$folder.base, "manuscript/figure.S2.pdf"), device = cairo_pdf, width = 400, height = 320, unit = "mm")
+```
+
+S figure 3: rarefaction curves by habitat, Bacteria
+
+```{r, fig.width=16, fig.height=16}
+proc.rarefaction.all %>%
+  filter(domain == "Bacteria") %>%
+  filter(h5 != "all") %>%
+  select(domain, cutoff, h5, h5.cat, step, pg3:spire.unbinned) %>%
+  group_by(domain, cutoff, h5, h5.cat, step) %>%
+  summarise(across(pg3:spire.unbinned, median)) %>%
+  ungroup() %>%
+  pivot_longer(pg3:spire.unbinned) %>%
+  mutate(
+    h5 = fct_relevel(h5, c("all", levels(dat.sample.rarefy$h5))),
+    name = fct_relevel(name, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned.non_singleton", "spire.unbinned"))),
+    h5.cat = fct_relevel(h5.cat, c("all", "intestine", "human (other)", "anthropogenic", "plant-assoc.", "soil", "aquatic", "air", "other"))
+  ) %>%
+  ggplot(
+    aes(
+      x = step,
+      y = value,
+      group = h5,
+      colour = name,
+      fill = name,
+      group = name
+    )
+  ) +
+  stat_smooth(se=FALSE, geom="area",
+              method = 'loess', alpha=1,
+              span = 0.8,aes(fill=name, group = interaction(name, h5))) +
+  xlab("number of samples") +
+  ylab("number of species discovered") +
+  scale_color_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  scale_fill_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  scale_x_continuous(breaks = c(seq(0, 5000, by = 1000), seq(10000, 20000, by = 5000)), position = "bottom", labels = c("0", paste0(c(seq(1, 5, by = 1), seq(10, 20, by = 5)), "k")), trans = "sqrt") +
+  scale_y_continuous(breaks = seq(0, 100000, by = 20000), position = "left", labels = c("0", paste0(seq(20, 100, by = 20), "k"))) +
+  xlab("n of samples") +
+  ylab("n of discovered species") +
+  #geom_point(aes(group = name)) +
+  #scale_x_sqrt() +
+  #scale_y_sqrt() +
+  facet_wrap(h5 ~ .) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.2, colour = "#d9d9d9"),
+    axis.title = element_text(family = "Avenir Next"),
+    axis.text = element_text(family = "Avenir Next"),
+    legend.text = element_text(family = "Avenir Next"),
+    legend.title = element_text(family = "Avenir Next"),
+    strip.text = element_text(family = "Avenir Next")
+  ) +
+  NULL -> p.rarefactiion.bacteria.by_habitat
+p.rarefactiion.bacteria.by_habitat
+
+ggsave(p.rarefactiion.bacteria.by_habitat, file = paste0(PARAM$folder.base, "manuscript/figure.S3.pdf"), device = cairo_pdf, width = 400, height = 320, unit = "mm")
+```
+
+Export global rarefaction curve for *Archaea*.
+
+```{r, fig.width=8, fig.height=5}
+proc.rarefaction.all %>%
+  filter(domain == "Archaea") %>%
+  filter(h5 == "all") %>%
+  select(domain, cutoff, h5, h5.cat, step, pg3:spire.unbinned) %>%
+  group_by(domain, cutoff, h5, h5.cat, step) %>%
+  summarise(across(pg3:spire.unbinned, median)) %>%
+  ungroup() %>%
+  pivot_longer(pg3:spire.unbinned) %>%
+  mutate(
+    h5 = fct_relevel(h5, c("all", levels(dat.sample.rarefy$h5))),
+    name = fct_relevel(name, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned.non_singleton", "spire.unbinned"))),
+    h5.cat = fct_relevel(h5.cat, c("all", "intestine", "human (other)", "anthropogenic", "plant-assoc.", "soil", "aquatic", "air", "other"))
+  ) %>%
+  ggplot(
+    aes(
+      x = step,
+      y = value,
+      group = h5,
+      colour = name,
+      fill = name,
+      group = name
+    )
+  ) +
+  stat_smooth(se=FALSE, geom="area",
+              method = 'loess', alpha=1,
+              span = 0.8,aes(fill=name, group = name)) +
+  #geom_smooth(se = F, aes(group = name), colour = "darkgrey") +
+  #Add reference lines for reference datasets
+  #PG3 bacteria
+  geom_hline(
+    yintercept = proc.baseline %>%
+      filter(name == "pg3" & domain == "Archaea") %>%
+      pull(median),
+    color = col.pg3, linetype = "dashed", linewidth = 0.8
+  ) +
+  #GTDB r220 Bacteria
+  geom_hline(
+    yintercept = proc.baseline %>%
+      filter(name == "gtdb_r220" & domain == "Archaea") %>%
+      pull(median),
+    color = col.gtdb, linetype = "dashed", linewidth = 0.8
+  ) +
+  geom_hline(yintercept = proc.baseline %>%
+    filter(name == "spire.mag" & domain == "Archaea") %>%
+    pull(median),
+    color = col.spire.mag, linetype = "dashed", linewidth = 0.8
+  ) +
+  #geom_hline(yintercept = 1461, color = "#33a02c", linetype = "dashed", linewidth = 0.8) + #PG3 archaea
+  #geom_hline(yintercept = 6254, color = "#08519c", linetype = "dashed", linewidth = 0.8) + #SPIRE archaea
+  #geom_line(data = tmp.data.h5, aes(group = h5), colour = "darkgrey") +
+  #geom_smooth(se = F) +
+  xlab("number of samples") +
+  ylab("number of species discovered") +
+  scale_color_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  scale_fill_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  scale_x_continuous(breaks = seq(0, 100000, by = 10000), position = "bottom", labels = c("0", paste0(seq(10, 100, by = 10), "k"))) +
+  scale_y_continuous(breaks = seq(0, 40000, by = 10000), position = "left", labels = c("0", paste0(seq(10, 40, by = 10), "k"))) +
+  #geom_point(aes(group = name)) +
+  #scale_x_sqrt() +
+  #scale_y_sqrt() +
+  #facet_grid(h5.cat ~ name) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.2, colour = "#d9d9d9"),
+    axis.title = element_blank(),
+    axis.text = element_text(family = "Avenir Next")
+  ) +
+  NULL -> p.rarefactiion.archaea
+p.rarefactiion.archaea
+
+ggsave(p.rarefactiion.archaea, file = paste0(PARAM$folder.base, "manuscript/figure.rarefaction_all/rarefaction.all.arch.svg"), width = 90, height = 30, unit = "mm")
+```
+
+Export global rarefaction curve for *Bacteria*.
+
+```{r, fig.width=8, fig.height=5}
+proc.rarefaction.all %>%
+  filter(domain == "Bacteria") %>%
+  filter(h5 == "all") %>%
+  select(domain, cutoff, h5, h5.cat, step, pg3:spire.unbinned) %>%
+  group_by(domain, cutoff, h5, h5.cat, step) %>%
+  summarise(across(pg3:spire.unbinned, median)) %>%
+  ungroup() %>%
+  pivot_longer(pg3:spire.unbinned) %>%
+  mutate(
+    h5 = fct_relevel(h5, c("all", levels(dat.sample.rarefy$h5))),
+    name = fct_relevel(name, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned.non_singleton", "spire.unbinned"))),
+    h5.cat = fct_relevel(h5.cat, c("all", "intestine", "human (other)", "anthropogenic", "plant-assoc.", "soil", "aquatic", "air", "other"))
+  ) %>%
+  ggplot(
+    aes(
+      x = step,
+      y = value,
+      group = h5,
+      colour = name,
+      fill = name,
+      group = name
+    )
+  ) +
+  stat_smooth(se=FALSE, geom="area",
+              method = 'loess', alpha=1,
+              span = 0.8,aes(fill=name, group = name)) +
+  #geom_smooth(se = F, aes(group = name), colour = "darkgrey") +
+  #Add reference lines for reference datasets
+  #PG3 bacteria
+  geom_hline(
+    yintercept = proc.baseline %>%
+      filter(name == "pg3" & domain == "Bacteria") %>%
+      pull(median),
+    color = col.pg3, linetype = "dashed", linewidth = 0.8
+  ) +
+  #GTDB r220 Bacteria
+  geom_hline(
+    yintercept = proc.baseline %>%
+      filter(name == "gtdb_r220" & domain == "Bacteria") %>%
+      pull(median),
+    color = col.gtdb, linetype = "dashed", linewidth = 0.8
+  ) +
+  geom_hline(yintercept = proc.baseline %>%
+    filter(name == "spire.mag" & domain == "Bacteria") %>%
+    pull(median),
+    color = col.spire.mag, linetype = "dashed", linewidth = 0.8
+  ) +
+  #geom_hline(yintercept = 1461, color = "#33a02c", linetype = "dashed", linewidth = 0.8) + #PG3 archaea
+  #geom_hline(yintercept = 6254, color = "#08519c", linetype = "dashed", linewidth = 0.8) + #SPIRE archaea
+  #geom_line(data = tmp.data.h5, aes(group = h5), colour = "darkgrey") +
+  #geom_smooth(se = F) +
+  xlab("number of samples") +
+  ylab("number of species discovered") +
+  scale_color_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  scale_fill_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  scale_x_continuous(breaks = seq(0, 100000, by = 10000), position = "bottom", labels = c("0", paste0(seq(10, 100, by = 10), "k"))) +
+  scale_y_continuous(breaks = seq(0, 700000, by = 100000), position = "left", trans = "reverse", labels = c("0", paste0(seq(100,700, by = 100), "k"))) +
+  #geom_point(aes(group = name)) +
+  #scale_x_sqrt() +
+  #scale_y_sqrt() +
+  #facet_grid(h5.cat ~ name) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.2, colour = "#d9d9d9"),
+    axis.title = element_blank(),
+    axis.text = element_text(family = "Avenir Next")
+  ) +
+  NULL -> p.rarefaction.bacteria
+p.rarefaction.bacteria
+
+ggsave(p.rarefaction.bacteria, file = paste0(PARAM$folder.base, "manuscript/figure.rarefaction_all/rarefaction.all.bac.svg"), width = 90, height = 90, unit = "mm")
+```
+
+Generate scatter plot of "number of samples" versus "species discovered" for each habitat
+
+```{r, fig.width=6, fig.height=6}
+library(ggh4x)
+
+proc.rarefaction.all %>%
+  select(domain, cutoff, marker_id, h5, h5.cat, step, pg3:spire.unbinned) %>%
+  group_by(domain, cutoff, marker_id, h5, h5.cat) %>%
+  slice_max(step) %>%
+  group_by(domain, cutoff, h5, h5.cat, step) %>%
+  summarise(across(pg3:spire.unbinned, median)) %>%
+  ungroup() %>%
+  pivot_longer(pg3:spire.unbinned) %>%
+  mutate(
+    h5.cat = case_when(
+      h5 == "all" ~ "all",
+      T ~ h5.cat
+    )
+  ) %>%
+  mutate(
+    h5 = fct_relevel(h5, c("all", levels(dat.sample.rarefy$h5))),
+    name = fct_relevel(name, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned.non_singleton", "spire.unbinned"))),
+    h5.cat = fct_relevel(h5.cat, c("all", "intestine", "human (other)", "anthropogenic", "plant-assoc.", "soil", "aquatic", "air", "other"))
+  ) %>%
+  ggplot(
+    aes(
+      x = value,
+      y = h5,
+      group = interaction(h5, domain),
+      colour = name,
+      fill = name,
+      #group = name
+      #size = step
+    )
+  ) +
+  geom_vline(xintercept = c(1,10,100,1000,10000,100000,1000000), colour = "darkgrey") +
+  geom_line(data = . %>% filter(domain == "Archaea"), colour = "#bdbdbd", size = 0.5, position = position_nudge(y = -0.2)) +
+  geom_line(data = . %>% filter(domain == "Bacteria"), colour = "#525252", size = 0.5, position = position_nudge(y = 0.2)) +
+  #geom_line(colour = "darkgrey", size = 0.5, aes(group = interaction(h5, domain)), position = position_dodge(height=0.2)) +
+  geom_point(data = . %>% filter(domain == "Archaea"), shape = 21, color = "grey", size = 2, aes(group = interaction(h5, domain)), position = position_nudge(y = -0.2)) +
+  geom_point(data = . %>% filter(domain == "Bacteria"), shape = 21, color = "grey", size = 2, aes(group = interaction(h5, domain)), position = position_nudge(y = 0.2)) +
+  #Add reference lines for reference datasets
+  scale_color_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  scale_fill_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  scale_y_discrete(limits = rev(c("all", levels(dat.sample.rarefy$h5))), labels = rev(c("all", levels(dat.sample.rarefy$h5)))) +
+  #scale_x_log10() +
+  scale_x_continuous(
+    breaks = c(
+      seq(0, 10),
+      seq(20, 100, by = 10),
+      seq(200, 1000, by = 100),
+      seq(2000, 10000, by = 1000),
+      seq(20000, 100000, by = 10000),
+      seq(200000, 1000000, by = 100000)
+    ),
+    trans = "log10"
+  ) +
+  #facet_grid(h5.cat ~ ., space = "free_y", scales = "free_y") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.2, colour = "#d9d9d9"),
+    strip.text = element_blank(),
+    axis.title = element_blank(),
+    #axis.text = element_text(family = "Avenir Next", size = 6),
+    axis.text = element_blank()
+  ) +
+  NULL -> p.scatter.all
+p.scatter.all
+
+ggsave(p.scatter.all, file = paste0(PARAM$folder.base, "manuscript/figure.rarefaction_all/scatter.all.svg"), width = 70, height = 110, unit = "mm")
+```
+
+Get some stats.
+
+```{r}
+proc.rarefaction.all %>%
+  select(domain, cutoff, marker_id, h5, h5.cat, step, pg3:spire.unbinned) %>%
+  group_by(domain, cutoff, marker_id, h5, h5.cat) %>%
+  slice_max(step) %>%
+  group_by(domain, cutoff, h5, h5.cat, step) %>%
+  summarise(across(pg3:spire.unbinned, median)) %>%
+  ungroup() %>%
+  mutate(
+    across(pg3:spire.mag, ~  100 *.x / spire.unbinned.non_singleton, .names = "{.col}.by_non_singleton"),
+    across(pg3:spire.mag, ~  100 *.x / spire.unbinned, .names = "{.col}.by_all")
+  ) %>%
+  select(domain, h5, h5.cat, pg3.by_non_singleton:spire.mag.by_all) %>%
+  pivot_longer(pg3.by_non_singleton:spire.mag.by_all) %>%
+  separate(name, into = c("data_source", "reference"), sep = ".by_") %>%
+  mutate(
+    h5.cat = case_when(
+      h5 == "all" ~ "all",
+      T ~ h5.cat
+    )
+  ) %>%
+  mutate(
+    h5 = fct_relevel(h5, rev(c("all", levels(dat.sample.rarefy$h5)))),
+    data_source = fct_relevel(data_source, (c("pg3", "gtdb_r220", "spire.mag"))),
+    h5.cat = fct_relevel(h5.cat, c("all", "intestine", "human (other)", "anthropogenic", "plant-assoc.", "soil", "aquatic", "air", "other"))
+  ) %>%
+  ggplot(aes(x = value, y = h5, colour = data_source, alpha = reference, group = h5, fill = data_source)) +
+  geom_line() +
+  geom_point(shape = 21, colour = "darkgrey", size = 2) +
+  scale_color_manual(values = c(col.pg3, col.gtdb, col.spire.mag)) +
+  scale_fill_manual(values = c(col.pg3, col.gtdb, col.spire.mag)) +
+  scale_alpha_manual(values = c(1, 0.8)) +
+  scale_x_continuous(breaks = c(0, 20, 40, 60, 80, 100), limits = c(0, 100)) +
+  xlab("% represented species") +
+  facet_grid(h5.cat ~ domain + data_source, space = "free_y", scales = "free_y") +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.title.x = element_text(family = "Avenir Next"),
+    axis.title.y = element_blank(),
+    axis.text = element_text(family = "Avenir Next"),
+    strip.text = element_blank(),
+    legend.text = element_text(family = "Avenir Next")
+  )  +
+  NULL -> p.representation
+p.representation
+
+ggsave(p.representation, file = paste0(PARAM$folder.base, "manuscript/figure.rarefaction_all/representation.all.svg"), width = 180, height = 160, unit = "mm")
+```
+
+
+Get species discovered per sample added.
+
+```{r}
+proc.rarefaction.all %>%
+  select(domain, cutoff, marker_id, h5, h5.cat, step, pg3:spire.unbinned) %>%
+  group_by(domain, cutoff, marker_id, h5, h5.cat) %>%
+  slice_max(step) %>%
+  group_by(domain, cutoff, h5, h5.cat, step) %>%
+  summarise(across(pg3:spire.unbinned, median)) %>%
+  ungroup() %>%
+  pivot_longer(pg3:spire.unbinned) %>%
+  mutate(
+    h5.cat = case_when(
+      h5 == "all" ~ "all",
+      T ~ h5.cat
+    )
+  ) %>%
+  mutate(
+    h5 = fct_relevel(h5, c("all", levels(dat.sample.rarefy$h5))),
+    name = fct_relevel(name, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned.non_singleton", "spire.unbinned"))),
+    h5.cat = fct_relevel(h5.cat, c("all", "intestine", "human (other)", "anthropogenic", "plant-assoc.", "soil", "aquatic", "air", "other"))
+  ) %>%
+  filter(name %in% c("spire.mag")) %>%
+  group_by(h5, h5.cat, step, name) %>%
+  summarise(
+    species_per_step = sum(value) / first(step)
+  ) %>%
+  arrange(desc(species_per_step))
+
+```
+
+
+Plot "alpha" values for species collection per habitat, per data source.
+
+```{r, fig.width=10, fig.height=6}
+proc.rarefaction.heap %>%
+  filter(term == "step.log") %>%
+  #Summarise slopes per marker gene
+  group_by(domain, cutoff, h5, name) %>%
+  summarise(
+    alpha.median = median(estimate + 1),
+    alpha.mean = mean(0 - estimate),
+    alpha.sd = sd(0 - estimate)
+  ) %>%
+  ungroup() %>%
+  mutate(h5 = fct_relevel(h5, c("all", levels(dat.sample.rarefy$h5)))) %>%
+  left_join(dat.h5.cat, by = "h5") %>%
+  mutate(
+    h5.cat = case_when(
+      h5 == "all" ~ "all",
+      T ~ h5.cat
+    )
+  ) %>%
+  mutate(
+    name = fct_relevel(name, c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned.non_singleton", "spire.unbinned")),
+    h5.cat = fct_relevel(h5.cat, c("all", "intestine", "human (other)", "anthropogenic", "plant-assoc.", "soil", "aquatic", "air", "other"))
+  ) %>%
+  #group_by(h5) %>% tally
+  ggplot(aes(
+    x = h5,
+    y = alpha.median,
+    color = name,
+    fill = name,
+    group = name
+  )) +
+  geom_hline(yintercept = c(0, 1), colour = "darkgrey") +
+  geom_line(size = 0.5) +
+  geom_point(shape = 21, color = "grey", size = 2) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  scale_color_manual(values = c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned)) +
+  scale_fill_manual(values = c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned)) +
+  ylab("species discovery coefficient") +
+  facet_grid(domain ~ h5.cat, space = "free_x", scales = "free_x") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(family = "Avenir Next"),
+    axis.text = element_text(family = "Avenir Next"),
+    strip.text = element_text(family = "Avenir Next")
+  ) +
+  NULL -> p.alpha
+p.alpha
+
+ggsave(p.alpha, file = paste0(PARAM$folder.base, "manuscript/figure.rarefaction_all/alpha.all.svg"), width = 180, height = 100, unit = "mm")
+```
+
+## Incremental rarefactions across habitats
+
+Prepare data.
+
+```{r}
+proc.baseline.incremental <- proc.baseline
+
+#Baseline data
+proc.baseline.incremental <- res.baseline.incremental %>%
+  #Get HMM info per marker_id
+  left_join(dat.hmm %>% select(marker_id, domain, length_aa), by = "marker_id") %>%
+  #Drop deviating marker genes
+  filter(marker_id %in% use.marker_id$marker_id) %>%
+  select(domain, marker_id, cutoff, n.pg3, n.gtdb_r220.unique, n.spire.mag.unique) %>%
+  pivot_longer(n.pg3:n.spire.mag.unique) %>%
+  mutate(
+    use.model = case_when(
+      grepl("pg3", name) ~ "pg3",
+      grepl("gtdb_", name) ~ "gtdb_r220",
+      T ~ "spire.ani_cluster"
+    )
+  ) %>%
+  left_join(lm.cluster_species %>% select(marker_id, cutoff, source, estimate), by = c("marker_id" = "marker_id", "cutoff" = "cutoff", "use.model" = "source")) %>%
+  mutate(n.species = value * estimate) %>%
+  #Re-calculate baselines as "composites" of the various values
+  select(domain:name, n.species) %>%
+  pivot_wider(names_from = "name", values_from = "n.species") %>%
+  mutate(
+    pg3 = n.pg3,
+    gtdb_r220 = n.pg3 + n.gtdb_r220.unique,
+    spire.mag = n.pg3 + n.gtdb_r220.unique + n.spire.mag.unique
+  ) %>%
+  #Summarise across marker genes and re-organise
+  select(domain:cutoff, pg3:spire.mag) %>%
+  pivot_longer(pg3:spire.mag) %>%
+  group_by(domain, name) %>%
+  summarise(
+    median = median(value, na.rm=T),
+    mean = mean(value),
+    sd = sd(value)
+  ) %>%
+  mutate(name = fct_relevel(name, rev(c("pg3", "gtdb_r220", "spire.mag"))))
+
+#Actual gene cluster and inferred species counts from incremental rarefaction
+#=> for each data series, adjust values by respective baselines
+proc.rarefaction.incremental <- res.rarefaction.incremental %>%
+  #Get HMM info per marker_id
+  left_join(dat.hmm %>% select(marker_id, domain, length_aa), by = "marker_id") %>%
+  filter(marker_id %in% use.marker_id$marker_id) %>%
+  #Reshape data and transform n.cluster -> n.species with estimates specific for marker_id and for data source
+  select(domain, marker_id, cutoff, h5, step, step.glob, i, glob.pg3, glob.gtdb_r220.unique, n.spire.mag, n.spire.unbinned.non_singleton.unique, n.spire.unbinned.unique) %>%
+  pivot_longer(glob.pg3:n.spire.unbinned.unique) %>%
+  mutate(
+    use.model = case_when(
+      grepl("pg3", name) ~ "pg3",
+      grepl("gtdb_", name) ~ "gtdb_r220",
+      T ~ "spire.ani_cluster"
+    )
+  ) %>%
+  left_join(lm.cluster_species %>% select(marker_id, cutoff, source, estimate), by = c("marker_id" = "marker_id", "cutoff" = "cutoff", "use.model" = "source")) %>%
+  mutate(n.species = value * estimate) %>%
+  #Re-calculate species estimates as "composites" of the various values
+  select(domain:name, n.species) %>%
+  pivot_wider(names_from = "name", values_from = "n.species") %>%
+  #Summarise across iterations per marker gene
+  group_by(domain, marker_id, cutoff, h5, step, step.glob) %>%
+  summarise(across(glob.pg3:n.spire.unbinned.unique, mean)) %>%
+  #Re-calculate composite values
+  mutate(
+    pg3 = glob.pg3,
+    gtdb_r220 = glob.pg3 + glob.gtdb_r220.unique,
+    spire.mag = glob.pg3 + glob.gtdb_r220.unique + n.spire.mag,
+    spire.unbinned.non_singleton = glob.pg3 + glob.gtdb_r220.unique + n.spire.mag + n.spire.unbinned.non_singleton.unique,
+    spire.unbinned = glob.pg3 + glob.gtdb_r220.unique + n.spire.mag + n.spire.unbinned.unique
+  ) %>%
+  #Summarise across marker genes per domain
+  group_by(domain, cutoff, h5, step, step.glob) %>%
+  summarise(across(glob.pg3:spire.unbinned, median)) %>%
+  #Get baseline counts and adjust accordingly
+  left_join(
+    proc.baseline.incremental %>%
+      select(domain, name, median) %>%
+      pivot_wider(names_from = name, values_from = median),
+    by = "domain",
+    suffix = c("", ".baseline")
+  ) %>%
+  ungroup() %>%
+  left_join(dat.h5.cat, by = "h5")
+```
+
+Generate stacked area chart: Bacteria
+
+```{r, fig.width=10, fig.height=10}
+p.rarefy.incremental.bac <- proc.rarefaction.incremental %>%
+  filter(domain == "Bacteria") %>%
+  mutate(spire.unbinned.alt = n.spire.unbinned.unique - n.spire.unbinned.non_singleton.unique) %>%
+  select(
+    domain, h5, h5.cat, step.glob,
+    pg3,
+    gtdb_r220 = glob.gtdb_r220.unique,
+    spire.mag = n.spire.mag,
+    spire.unbinned.non_singleton = n.spire.unbinned.non_singleton.unique,
+    spire.unbinned = spire.unbinned.alt
+  ) %>%
+  pivot_longer(pg3:spire.unbinned) %>%
+  mutate(
+    name = fct_relevel(name, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned.non_singleton", "spire.unbinned")))
+  ) %>%
+  ggplot(aes(
+    x = step.glob,
+    y = value,
+    group = name,
+    colour = name
+  )) +
+  #Stacked area plot
+  geom_area(aes(fill = name)) +
+  geom_hline(yintercept = 0, colour = "lightgrey", linewidth = 0.8) +
+  #Add separators by h5 across sample counts (x axis)
+  geom_segment(
+    data = . %>%
+      group_by(domain, h5) %>%
+      slice_max(step.glob) %>%
+      summarise(value = sum(value), step.glob = first(step.glob)),
+    aes(xend = step.glob, yend = 0, group = NA),
+    alpha = 1,
+    #colour = "#807dba",
+    colour = "#DE77AE",
+    linewidth = 0.2,
+    linetype = "dashed"
+  ) +
+  #Add separators by h5.cat across sample counts (y axis)
+  geom_segment(
+    data = . %>%
+      group_by(domain, h5.cat) %>%
+      slice_max(step.glob) %>%
+      summarise(value = sum(value), step.glob = first(step.glob)),
+    aes(xend = step.glob, yend = 0, group = NA),
+    alpha = 1,
+    colour = "#C51B7D",
+    linewidth = 0.5
+  ) +
+  geom_point(
+    data = . %>%
+      group_by(domain, h5) %>%
+      slice_max(step.glob) %>%
+      summarise(value = sum(value), step.glob = first(step.glob)),
+    alpha = 1,
+    colour = "#DE77AE",
+    aes(group = NA)
+  ) +
+  #Add points at zero line
+  geom_point(
+    data = . %>%
+      group_by(domain, h5) %>%
+      slice_max(step.glob) %>%
+      summarise(value = sum(value), step.glob = first(step.glob)),
+    alpha = 1,
+    colour = "#DE77AE",
+    aes(y = 0, group = NA)
+  ) +
+  #Add reference lines for reference datasets
+  #PG3 bacteria
+  geom_hline(
+    yintercept = proc.baseline.incremental %>%
+      filter(name == "pg3" & domain == "Bacteria") %>%
+      pull(median),
+    color = col.pg3, linetype = "dashed", linewidth = 0.8
+  ) +
+  #GTDB r220 Bacteria
+  geom_hline(
+    yintercept = proc.baseline.incremental %>%
+      filter(name == "gtdb_r220" & domain == "Bacteria") %>%
+      pull(median),
+    color = col.gtdb, linetype = "dashed", linewidth = 0.8
+  ) +
+  geom_hline(yintercept = proc.baseline.incremental %>%
+    filter(name == "spire.mag" & domain == "Bacteria") %>%
+    pull(median),
+    color = col.spire.mag, linetype = "dashed", linewidth = 0.8
+  ) +
+  xlab("number of samples") +
+  ylab("number of species discovered") +
+  scale_x_continuous(breaks = seq(0, 100000, by = 10000), position = "bottom", labels = c("0", paste0(seq(10, 100, by = 10), "k"))) +
+  scale_y_continuous(breaks = seq(0, 700000, by = 100000), position = "left", trans = "reverse", labels = c("0", paste0(seq(100,700, by = 100), "k"))) +
+  scale_color_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  scale_fill_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.2, colour = "#d9d9d9"),
+    axis.title = element_text(family = "Avenir Next"),
+    axis.text = element_text(family = "Avenir Next")
+  ) +
+  NULL
+p.rarefy.incremental.bac
+
+extrafont::loadfonts()
+ggsave(p.rarefy.incremental.bac, file = paste0(PARAM$folder.base, "manuscript/figure.rarefaction_incremental/rarefaction.incremental.bac.svg"), width = 180, height = 160, unit = "mm")
+```
+
+
+```{r, fig.width=6, fig.height=6}
+proc.rarefaction.incremental %>%
+  #filter(domain == "Bacteria") %>%
+  mutate(spire.unbinned.alt = n.spire.unbinned.unique - n.spire.unbinned.non_singleton.unique) %>%
+  select(
+    domain, h5, h5.cat, step.glob,
+    pg3:spire.unbinned
+  ) %>%
+  pivot_longer(pg3:spire.unbinned) %>%
+  mutate(
+    name = fct_relevel(name, c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned.non_singleton", "spire.unbinned")),
+  ) %>%
+  group_by(domain, h5) %>%
+  slice_max(step.glob) %>%
+  ungroup() %>%
+  arrange(domain, name, h5.cat, h5) %>%
+  group_by(domain, name) %>%
+  #summarise(value = sum(value), step.glob = first(step.glob)) %>%
+  #ungroup() %>%
+  mutate(
+    sp.unique = pmax(0, value - lag(value, default = 0)),
+    n.sample = step.glob - lag(step.glob, default = 0)
+  ) %>%
+  mutate(
+    sp_per_sample = sp.unique / n.sample,
+    h5 = fct_relevel(h5, rev(levels(dat.sample.rarefy$h5)))
+  ) %>%
+  ungroup() %>%
+  #summarise(cor = cor(n.sample, sp_per_sample, method = "spearman"))
+  ggplot(aes(x = sp_per_sample, y = h5, group = h5, colour = name, fill = name)) +
+  geom_line(colour = "grey") +
+  geom_point(shape = 21, colour = "darkgrey", size = 2) +
+  scale_color_manual(values = c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned)) +
+  scale_fill_manual(values = c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned)) +
+  scale_alpha_manual(values = c(1, 0.8)) +
+  scale_x_continuous(trans = "sqrt") +
+  guides(fill = guide_legend(nrow = 3, title = "data source")) +
+  xlab("incrementally added species per sample") +
+  facet_grid(h5.cat ~ domain, space = "free_y", scales = "free") +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.title.x = element_text(family = "Avenir Next"),
+    axis.title.y = element_blank(),
+    axis.text = element_text(family = "Avenir Next"),
+    strip.text.x = element_text(family = "Avenir Next"),
+    strip.text.y = element_blank(),
+    legend.text = element_text(family = "Avenir Next"),
+    legend.title = element_text(family = "Avenir Next")
+  )  +
+  NULL -> p.species.incremental
+p.species.incremental
+
+extrafont::loadfonts()
+ggsave(p.species.incremental, file = paste0(PARAM$folder.base, "manuscript/figure.rarefaction_incremental/species_added_incrementally.pdf"), device = cairo_pdf, width = 180, height = 180, unit = "mm")
+```
+
+Generate stacked area chart: Bacteria
+
+```{r, fig.width=10, fig.height=6}
+p.rarefy.incremental.arch <- proc.rarefaction.incremental %>%
+  filter(domain == "Archaea") %>%
+  mutate(spire.unbinned.alt = n.spire.unbinned.unique - n.spire.unbinned.non_singleton.unique) %>%
+  select(
+    domain, h5, h5.cat, step.glob,
+    pg3,
+    gtdb_r220 = glob.gtdb_r220.unique,
+    spire.mag = n.spire.mag,
+    spire.unbinned.non_singleton = n.spire.unbinned.non_singleton.unique,
+    spire.unbinned = spire.unbinned.alt
+  ) %>%
+  pivot_longer(pg3:spire.unbinned) %>%
+  mutate(
+    name = fct_relevel(name, rev(c("pg3", "gtdb_r220", "spire.mag", "spire.unbinned.non_singleton", "spire.unbinned")))
+  ) %>%
+  ggplot(aes(
+    x = step.glob,
+    y = value,
+    group = name,
+    colour = name
+  )) +
+  #Stacked area plot
+  geom_area(aes(fill = name)) +
+  geom_hline(yintercept = 0, colour = "lightgrey", linewidth = 0.8) +
+  #Add separators by h5 across sample counts (x axis)
+  geom_segment(
+    data = . %>%
+      group_by(domain, h5) %>%
+      slice_max(step.glob) %>%
+      summarise(value = sum(value), step.glob = first(step.glob)),
+    aes(xend = step.glob, yend = 0, group = NA),
+    alpha = 1,
+    #colour = "#807dba",
+    colour = "#DE77AE",
+    linewidth = 0.2,
+    linetype = "dashed"
+  ) +
+  #Add separators by h5.cat across sample counts (y axis)
+  geom_segment(
+    data = . %>%
+      group_by(domain, h5.cat) %>%
+      slice_max(step.glob) %>%
+      summarise(value = sum(value), step.glob = first(step.glob)),
+    aes(xend = step.glob, yend = 0, group = NA),
+    alpha = 1,
+    colour = "#C51B7D",
+    linewidth = 0.5
+  ) +
+  geom_point(
+    data = . %>%
+      group_by(domain, h5) %>%
+      slice_max(step.glob) %>%
+      summarise(value = sum(value), step.glob = first(step.glob)),
+    alpha = 1,
+    colour = "#DE77AE",
+    aes(group = NA)
+  ) +
+  #Add reference lines for reference datasets
+  #PG3 bacteria
+  geom_hline(
+    yintercept = proc.baseline.incremental %>%
+      filter(name == "pg3" & domain == "Archaea") %>%
+      pull(median),
+    color = col.pg3, linetype = "dashed", linewidth = 0.8
+  ) +
+  #GTDB r220 Bacteria
+  geom_hline(
+    yintercept = proc.baseline.incremental %>%
+      filter(name == "gtdb_r220" & domain == "Archaea") %>%
+      pull(median),
+    color = col.gtdb, linetype = "dashed", linewidth = 0.8
+  ) +
+  geom_hline(yintercept = proc.baseline.incremental %>%
+    filter(name == "spire.mag" & domain == "Archaea") %>%
+    pull(median),
+    color = col.spire.mag, linetype = "dashed", linewidth = 0.8
+  ) +
+  xlab("number of samples") +
+  ylab("number of species discovered") +
+  scale_x_continuous(breaks = seq(0, 100000, by = 10000), position = "bottom", labels = c("0", paste0(seq(10, 100, by = 10), "k"))) +
+  scale_y_continuous(breaks = seq(0, 70000, by = 10000), position = "left", labels = c("0", paste0(seq(10,70, by = 10), "k"))) +
+  scale_color_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  scale_fill_manual(values = rev(c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned))) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.2, colour = "#d9d9d9"),
+    axis.title = element_text(family = "Avenir Next"),
+    axis.title.x = element_blank(),
+    axis.text = element_text(family = "Avenir Next"),
+    axis.text.x = element_blank()
+  ) +
+  NULL
+p.rarefy.incremental.arch
+
+ggsave(p.rarefy.incremental.arch, file = paste0(PARAM$folder.base, "manuscript/figure.rarefaction_incremental/rarefaction.incremental.arch.svg"), width = 180, height = 40, unit = "mm", dpi = 300)
+```
+
+
+
+
+
+----
+
+
