@@ -34,6 +34,8 @@ The corresponding HMM models were downloaded via the GTDB-tk release v2. They re
 
 `bac120`: [bac120_msa_marker_info_r207.tsv](https://data.ace.uq.edu.au/public/gtdb/data/releases/release207/207.0/auxillary_files/bac120_msa_marker_info_r207.tsv)
 
+All extracted marker gene sequences are available for download [here](spire.embl.de/downloads)
+
 ---
 
 ### Clustering of marker genes.
