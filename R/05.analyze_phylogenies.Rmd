@@ -49,6 +49,12 @@ col.unbinned <-  "#ffffb3"
 
 ## Read data
 
+***
+
+**NOTE**: To run code below, downlaod data from Zenodo (DOI 10.5281/zenodo.17482698) and store locally in the according folder structure. The phylogeny workspaces are not uploaded, but can be generated using the script `04.job.infer_red_trees.R`. Raw trees and derived data are also available via the EBI BioStudies repository (see `README` for list of accessions).
+
+***
+
 Load sample metadata.
 
 ```{r}
@@ -748,6 +754,387 @@ ggsave(
   unit = "mm",
   device = cairo_pdf
 )
+```
+
+# Explore 'unbinned ratios'
+
+The following analyses pertain to Extended Figure 3.
+
+Load GTDB genome data.
+
+```{r}
+dat.genome.gtdb <- bind_rows(
+  read_tsv("data/gtdbr214/ar53_metadata_r214.tsv"),
+  read_tsv("data/gtdbr214/bac120_metadata_r214.tsv")
+) %>%
+  select(accession, coding_density, gc_percentage, genome_size, gtdb_representative, ncbi_genome_category, gtdb_taxonomy) %>%
+  separate(gtdb_taxonomy, into = c("domain", "phylum", "class", "order", "family", "genus", "species"), sep = ";")
+
+dat.genome.gtdb.summarised <- dat.genome.gtdb %>%
+  #First, get averages per species
+  group_by(domain, phylum, species) %>%
+  summarise(
+    genome_size = mean(genome_size),
+    gc_percentage = mean(gc_percentage),
+    coding_density = mean(coding_density),
+    n.ref_genomes = n(),
+    is_cultured = sum(ncbi_genome_category == "none") > 0
+  ) %>%
+  #Next, get median across species per phylum
+  group_by(domain, phylum) %>%
+  summarise(
+    genome_size = median(genome_size),
+    gc_percentage = median(gc_percentage),
+    coding_density = median(coding_density),
+    n.ref_genomes = sum(n.ref_genomes),
+    is_cultured = sum(is_cultured) > 0
+  ) %>%
+  ungroup()
+```
+
+Load GTDB r226 data.
+
+```{r}
+dat.genome.gtdb.r226 <- bind_rows(
+  read_tsv("data/gtdbr226/ar53_metadata.tsv.gz"),
+  read_tsv("data/gtdbr226/bac120_metadata.tsv.gz")
+) %>%
+  select(accession, coding_density, gc_percentage, genome_size, gtdb_representative, ncbi_genome_category, gtdb_taxonomy) %>%
+  separate(gtdb_taxonomy, into = c("domain", "phylum", "class", "order", "family", "genus", "species"), sep = ";")
+
+dat.genome.gtdb.r226.summarised <- dat.genome.gtdb.r226 %>%
+  #First, get averages per species
+  group_by(domain, phylum, species) %>%
+  summarise(
+    genome_size = mean(genome_size),
+    gc_percentage = mean(gc_percentage),
+    coding_density = mean(coding_density),
+    n.ref_genomes = n(),
+    is_cultured = sum(ncbi_genome_category == "none") > 0
+  ) %>%
+  #Next, get median across species per phylum
+  group_by(domain, phylum) %>%
+  summarise(
+    genome_size = median(genome_size),
+    gc_percentage = median(gc_percentage),
+    coding_density = median(coding_density),
+    n.ref_genomes = sum(n.ref_genomes),
+    is_cultured = sum(is_cultured) > 0
+  ) %>%
+  ungroup()
+
+dat.genome.gtdb.r226.summarised %>%
+  filter(is_cultured)
+
+dat.genome.gtdb.r226 %>%
+  #First, get averages per species
+  group_by(domain, phylum, species) %>%
+  summarise(
+    is_cultured = sum(ncbi_genome_category == "none") > 0
+  ) %>%
+  ungroup() %>%
+  filter(is_cultured)
+```
+
+Calculate mag-to-unbinned ratios. To do this:
+
+* loop through marker genes, re-load tree data
+* for each phylum, find MRCA
+* summarise information on tips
+
+```{r}
+#Create sub-environment into which workspaces will be loaded
+tree.env <- new.env(parent = baseenv())
+
+collect.res.ratio.arc <- tibble()
+
+#Loop through retained marker IDs
+for (mid in use.marker_id.arch) {
+  #Load current workspace into sub-environment
+  load(paste0(PARAM$folder.data, mid, "_workspaceTaxonomyPredictions_v3.RData"), envir = tree.env)
+  load(paste0("data/hmm_gtdb.clustering/", mid, ".spire_gtdb.clustered.965.Rdata"), envir = tree.env)
+  
+  tmp.idx <- tibble(
+    node = tree.env$rootedByMidPointLabeled$node.label,
+    node.idx = 1:Nnode(tree.env$rootedByMidPointLabeled) + Ntip(tree.env$rootedByMidPointLabeled)
+  )
+  
+  #Get current phyla with ≥5 tips from MAGs
+  tmp.phyla <- tree.env$dat.tree.tips %>%
+    group_by(phylum) %>%
+    tally() %>%
+    filter(n >= 5) %>%
+    filter(!is.na(phylum)) %>%
+    pull(phylum)
+  
+  #ACCOUNT FOR MAGS THAT ARE IN PG3 OR GTDB CLUSTERS TOO!!!
+  tmp.tree.tips <- tree.env$dat.tree.tips %>%
+    left_join(
+      tree.env$dat.clustering.by_cluster %>%
+        ungroup() %>%
+        filter(source %in% c("spire.mag", "spire.unbinned")) %>%
+        mutate(value = T) %>%
+        select(cluster,source, value) %>%
+        pivot_wider(names_from = source, values_fill = F),
+      by = "cluster"
+    )
+  
+  #Iterate through phyla, find LCA and calculate stats
+  collect.res.ratio.arc <- bind_rows(
+    collect.res.ratio.arc,
+    tibble(
+      marker_id = mid,
+      phylum = "all",
+      i = 0,
+      mrca = Ntip(tree.env$rootedByMidPointLabeled) + 1,
+      n.tips = Ntip(tree.env$rootedByMidPointLabeled),
+      n.mag = sum(tmp.tree.tips$spire.mag & !tmp.tree.tips$spire.unbinned, na.rm=T),
+      n.unbinned = sum(tmp.tree.tips$spire.unbinned & !tmp.tree.tips$spire.mag, na.rm=T),
+      n.both = sum(tmp.tree.tips$spire.mag & tmp.tree.tips$spire.unbinned, na.rm=T),
+      n.neither = sum(is.na(tmp.tree.tips$spire.mag) & is.na(tmp.tree.tips$spire.unbinned))
+    )
+  )
+  for (phy in tmp.phyla) {
+    writeLines(paste(date(), "=>", mid, phy))
+    
+    curr.tips <- tree.env$dat.tree.tips %>% filter(phylum == phy) %>% pull(raw.tip.label)
+    curr.n.tips <- length(curr.tips)
+    
+    if (curr.n.tips >= 100) {
+      for (i in 1:5) {
+        use.tips <- sample(curr.tips, size = round(0.2 * curr.n.tips))
+        
+        curr.mrca <- phytools::findMRCA(tree.env$rootedByMidPointLabeled, use.tips)
+        #tmp.mrca <- ape::getMRCA(rootedByMidPointLabeled, use.tips)
+        
+        #desc.idx <- Descendants(rootedByMidPointLabeled, curr.mrca, type = "tips")
+        desc.labels <- tree.env$rootedByMidPointLabeled$tip.label[Descendants(tree.env$rootedByMidPointLabeled, curr.mrca, type = "tips")[[1]]]
+        
+        curr.tree.tips <- tmp.tree.tips %>% filter(raw.tip.label %in% desc.labels)
+        
+        collect.res.ratio.arc <- bind_rows(
+          collect.res.ratio.arc,
+          tibble(
+            marker_id = mid,
+            phylum = phy,
+            i = i,
+            mrca = curr.mrca,
+            n.tips = length(desc.labels),
+            n.mag = sum(curr.tree.tips$spire.mag & !curr.tree.tips$spire.unbinned, na.rm=T),
+            n.unbinned = sum(curr.tree.tips$spire.unbinned & !curr.tree.tips$spire.mag, na.rm=T),
+            n.both = sum(curr.tree.tips$spire.mag & curr.tree.tips$spire.unbinned, na.rm=T),
+            n.neither = sum(is.na(curr.tree.tips$spire.mag) & is.na(curr.tree.tips$spire.unbinned))
+          )
+        )
+      }
+    } else {
+      curr.mrca <- phytools::findMRCA(tree.env$rootedByMidPointLabeled, curr.tips)
+      
+      desc.labels <- tree.env$rootedByMidPointLabeled$tip.label[Descendants(tree.env$rootedByMidPointLabeled, curr.mrca, type = "tips")[[1]]]
+      
+      curr.tree.tips <- tmp.tree.tips %>% filter(raw.tip.label %in% desc.labels)
+      
+      collect.res.ratio.arc <- bind_rows(
+        collect.res.ratio.arc,
+        tibble(
+          marker_id = mid,
+          phylum = phy,
+          i = 0,
+          mrca = curr.mrca,
+          n.tips = length(desc.labels),
+          n.mag = sum(curr.tree.tips$spire.mag & !curr.tree.tips$spire.unbinned, na.rm=T),
+          n.unbinned = sum(curr.tree.tips$spire.unbinned & !curr.tree.tips$spire.mag, na.rm=T),
+          n.both = sum(curr.tree.tips$spire.mag & curr.tree.tips$spire.unbinned, na.rm=T),
+          n.neither = sum(is.na(curr.tree.tips$spire.mag) & is.na(curr.tree.tips$spire.unbinned))
+        )
+      )
+    }
+  }
+
+}
+
+```
+
+Merge data with bacterial results (computed in individual jobs).
+
+```{r}
+collect.res.ratio.bac <- tibble()
+
+for (ff in list.files(paste0(PARAM$folder.data, "marker_trees/"), full.names = T)) {
+  load(ff)
+  
+  collect.res.ratio.bac <- bind_rows(
+    collect.res.ratio.bac,
+    collect.res.ratio %>%
+      mutate(domain = "Bacteria")
+  )
+}
+
+res.ratio <- bind_rows(
+  collect.res.ratio.arc %>%
+    mutate(domain = "Archaea"),
+  collect.res.ratio.bac
+)
+
+```
+
+Generate a nice(r) plot.
+
+```{r, fig.width=16}
+ggplot(tmp.res.ratio.summarised, aes(x = phylum, y = unbinned.ratio, fill = is_cultured)) +
+  geom_hline(yintercept = 1, colour = "darkgrey") +
+  geom_hline(data = . %>% filter(phylum == "all"), aes(yintercept = unbinned.ratio), colour = "darkgrey") +
+  geom_point(
+    shape = 21,
+    colour = "darkgrey",
+    stroke = 0.2,
+    size = 3
+  ) +
+  scale_x_discrete(guide = guide_axis(angle = 45), position = "top") +
+  scale_y_continuous(trans = "log2", name = "unbinned 'species' per MAG-represented species") +
+  scale_fill_manual(values = c("#7b3294", "#a6dba0")) +
+  scale_colour_manual(values = c("#7b3294", "#a6dba0")) +
+  facet_grid(. ~ domain, space = "free_x", scales = "free_x") +
+  #Prettify
+  theme_minimal(base_family = "Avenir Next", base_size = 8) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.2, colour = "darkgrey"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.text.x = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    axis.text.y = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    strip.text = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    strip.placement = "bottom"
+    #strip.text = element_blank(),
+  ) +
+  NULL -> p.unbinned_ratio.by_phylum
+p.unbinned_ratio.by_phylum
+
+ggsave(
+  p.unbinned_ratio.by_phylum,
+  filename = paste0(PARAM$folder.base, "results/unbinned_ratio.by_phylum.pdf"),
+  width = 320,
+  height = 120,
+  unit = "mm",
+  device = cairo_pdf
+)
+```
+
+Plot unbinned ratios against genome characteristics.
+
+```{r}
+tmp.res.ratio.summarised %>%
+  filter(phylum != "all") %>%
+  select(-dom_phy) %>%
+  mutate(genome_size = genome_size / 10^6) %>%
+  mutate(n.tips = log10(n.tips)) %>%
+  pivot_longer(c(n.tips, genome_size:coding_density), names_to = "variable") %>%
+  mutate(
+    var_name = case_when(
+      variable == "gc_percentage" ~ "GC content (%)",
+      variable == "genome_size" ~ "genome size (Mbp)",
+      variable == "coding_density" ~ "coding density (%)",
+      variable == "n.tips" ~ "log10(est. n of species)"
+    )
+  ) %>%
+  mutate(var_name = fct_relevel(var_name, c("GC content (%)", "genome size (Mbp)", "coding density (%)", "log10(est. n of species)"))) %>%
+  ggplot(aes(x = value, y = unbinned.ratio, colour = var_name, fill = var_name, group = var_name)) +
+  geom_smooth(method = "lm") +
+  geom_point(
+    shape = 21,
+    colour = "darkgrey",
+    stroke = 0.2,
+    size = 3
+  ) +
+  scale_y_continuous(trans = "log2", name = "unbinned 'species' per MAG-repr. species") +
+  scale_colour_brewer(palette = "Pastel1") +
+  scale_fill_brewer(palette = "Pastel1") +
+  facet_grid(. ~ var_name, scales = "free_x") +
+  #Prettify
+  theme_minimal(base_family = "Avenir Next", base_size = 8) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.2, colour = "darkgrey"),
+    axis.title.x = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.title.y = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.text.x = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    axis.text.y = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    strip.text = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    strip.placement = "bottom"
+    #strip.text = element_blank(),
+  ) +
+  NULL -> p.unbinned_ratio.by_variable
+p.unbinned_ratio.by_variable
+
+ggsave(
+  p.unbinned_ratio.by_variable,
+  filename = paste0(PARAM$folder.base, "results/unbinned_ratio.by_variable.pdf"),
+  width = 320,
+  height = 90,
+  unit = "mm",
+  device = cairo_pdf
+)
+```
+
+Check for associations between 
+
+```{r}
+#normalise variables by z scoring
+tmp.res.ratio.summarised.normalized <- tmp.res.ratio.summarised %>%
+  filter(phylum != "all") %>%
+  mutate(
+    across(c(n.tips, genome_size:n.ref_genomes), ~ (.x - mean(.x, na.rm=T)) / sd(.x, na.rm = T))
+  )
+```
+
+Check for an association with cultivation (do phyla with cultivated representatives have better MAG representation?)
+
+```{r}
+wilcox.test(unbinned.ratio ~ is_cultured, data = tmp.res.ratio.summarised %>% filter(phylum != "all"))
+effsize::cohen.d(unbinned.ratio ~ is_cultured, data = tmp.res.ratio.summarised %>% filter(phylum != "all"))
+```
+
+Check combined model.
+
+```{r}
+tmp.lm <- lm(unbinned.ratio ~ gc_percentage + genome_size + coding_density + n.tips + n.ref_genomes, data = tmp.res.ratio.summarised.normalized)
+summary(tmp.lm)
+summary(aov(tmp.lm))
+```
+
+Check individual variables. First, GC content.
+
+```{r}
+tmp.lm <- lm(unbinned.ratio ~ gc_percentage, data = tmp.res.ratio.summarised.normalized)
+summary(tmp.lm)
+summary(aov(tmp.lm))
+```
+
+Genome size.
+
+```{r}
+tmp.lm <- lm(unbinned.ratio ~ genome_size, data = tmp.res.ratio.summarised.normalized)
+summary(tmp.lm)
+summary(aov(tmp.lm))
+```
+
+Coding density.
+
+```{r}
+tmp.lm <- lm(unbinned.ratio ~ coding_density, data = tmp.res.ratio.summarised.normalized)
+summary(tmp.lm)
+summary(aov(tmp.lm))
+```
+
+N of species.
+
+```{r}
+tmp.lm <- lm(unbinned.ratio ~ n.tips, data = tmp.res.ratio.summarised.normalized)
+summary(tmp.lm)
+summary(aov(tmp.lm))
 ```
 
 # Export sample data table
