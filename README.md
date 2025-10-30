@@ -155,6 +155,28 @@ The corresponding code can be found in
 
 ---
 
+### Willis' law and Yule curves
+
+Rationale:
+
+> Four datasets were used to fit clade sizes to previously suggested distributions: (i) the above-defined clade-level groups (based on RED cutoffs), for each archaeal and bacterial marker gene; (ii) the GTDB r226 archaeal and bacterial reference taxonomies (accessed via gtdb.ecogenomic.org); (iii) the Global Biodiversity Information Facility (GBIF) backbone taxonomy for eukaryotes, bacteria, archaea and viruses, accessed using the taxizedb R package (Chamberlain et al. 2023); (iv) the Microbe Atlas Project (Rodrigues et al. 2025) 16S rRNA reference database v3.0 (Rodrigues et al. 2017), using 97% OTUs to represent ‘species’ and 90% OTUs to represent ‘genus’. For each of these taxonomies, we first fit “Willis’ curves” (Willis and Yule 1922) relating the frequency of clades to their size (i.e., the number of subclades they contain) as a regular power law:
+> 
+> C = a * S-ω (3)
+> 
+> where C is the number of higher clades (e.g., genus) containing S sub-clades (e.g., species); a is a proportionality constant; and ω is the scaling coefficients, referred to as Willis coefficient here for simplicity. In other words, (3) relates the frequency of a clade to its size, with positive ω values indicating that large clades (e.g., genera containing many species) are exponentially less common than small clades (e.g., genera containing few or only one species). Otherwise, given the similarity of eq (3) to eq (1) above, the interpretation of ω is closely related to that of the above-defined species discovery coefficient α.
+> 
+> We moreover fit clade sizes to the distribution first suggested by Yule (Yule 1925) specifically for this purpose and later formalized by Simon (Simon 1955):
+>
+> f(CS) = ρ * Β(CS, ρ + 1) (4)
+>
+> where f(CS) is the non-negative frequency of clades of size S (i.e., containing S sub-clades); Β is the beta function; and  ρ > 0 is the Yule-Simon shape parameter. The distribution results from a Yule process where newly arising subclades preferentially attach to larger existing clades, proportionally to the existing clades’ sizes, sometimes colloquially referred to as a “rich get richer” process. For sufficiently large counts CS, the frequency f(CS) approximates a power law as in eq (3), with coefficient ω ∼ ρ + 1. Parameter ρ indicates the shape of the distribution and the strength of ‘preferential attachment’, with large ρ indicating a sharper drop in the distribution (less pronounced preferential attachment, distribution less tail-heavy, higher dominance by small clades), whereas smaller ρ indicate more tail-heavy distributions and stronger preferential attachment effects (large clades are larger, small clades are fewer). In other words, ρ can be thought of as a “rich get richer” coefficient, with low ρ values indicating a stronger dominance of fewer large clades in the clade size distribution.
+
+The corresponding code can be found in
+
+* [06.yule_curves.Rmd](https://github.com/grp-schmidt/ms-census/blob/main/R/06.yule_curves.Rmd)
+
+---
+
 ## Availability of underlying data
 
 Metagenomic assemblies, Metagenome-Assembled Genomes (MAGs), gene calls and corresponding annotations are available via the SPIRE db [downloads page](spire.embl.de/downloads).
