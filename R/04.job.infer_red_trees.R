@@ -8,6 +8,12 @@
 #
 #Usage:
 #Rscript cut.clades.Bacteria.R [marker_id]
+#
+#***
+#
+#**NOTE**: To run code below, downlaod data from Zenodo (DOI 10.5281/zenodo.17482698) and store locally in the according folder structure.
+#
+#***
 ################################################################################
 #Load libraries
 library(tidyverse, quietly = T)
