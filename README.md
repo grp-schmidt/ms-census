@@ -159,6 +159,8 @@ The corresponding code can be found in
 
 Metagenomic assemblies, Metagenome-Assembled Genomes (MAGs), gene calls and corresponding annotations are available via the SPIRE db [downloads page](spire.embl.de/downloads).
 
+Intermediary and pre-processed files to run scripts in the present repository are availbale via Zenodo under DOI 10.5281/zenodo.17482698. Please note that due to data size (several 10s of GBs), some data packages are only released for archaeal marker genes as example datasets run scripts.
+
 Inferred marker gene phylogenies with annotations, as well as pre-generated tree visualizations for archaeal markers are available via the EBI BioStudies repository the following accessions:
 
 | Accession | Description |
