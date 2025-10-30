@@ -380,6 +380,66 @@ for (mid in dat.hmm$marker_id) {
 
 ```
 
+Analyse resulting linear models per marker gene and cutoff (Extended Figure 8).
+
+```{r, fig.width=15, fig.height=15}
+#First, get the marker genes to be included per domain
+#use.marker_id
+#use.marker_id.arch
+
+collect.rarefaction %>%
+  filter(cutoff == "965") %>%
+  filter(
+    marker_id %in% c(
+      sample(use.marker_id, 10),
+      sample(use.marker_id.arch, 10)
+    )
+  ) %>%
+  left_join(dat.hmm %>% select(marker_id, domain), by = "marker_id") %>%
+  ggplot(aes(x = n.cluster, y = n.species, colour = source, fill = source, group = source)) +
+    geom_abline(slope = 1, colour = "grey") +
+    geom_smooth(aes(group = source), method = "lm", formula = "y ~ x + 0", se = F, linewidth = 0.7) +
+    geom_point(shape = 21, colour = "grey", stroke = 0.1, size = 1) +
+    scale_x_sqrt() +
+    scale_y_sqrt() +
+    scale_colour_brewer(palette = "Paired") +
+    scale_fill_brewer(palette = "Paired") +
+    xlab("n of sequence clusters (at 96.5%)") +
+    ylab("n of species discovered") +
+    facet_wrap(
+      domain + marker_id ~ .,
+      nrow = 4,
+      scales = "free",
+      labeller = function (labels) {
+               labels <- lapply(labels, as.character)
+               list(do.call(paste, c(labels, list(sep = "\n"))))
+             }
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "bottom",
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(linewidth = 0.2, colour = "#d9d9d9"),
+      axis.title = element_text(family = "Avenir Next"),
+      axis.text = element_text(family = "Avenir Next", size = 5),
+      legend.text = element_text(family = "Avenir Next"),
+      legend.title = element_text(family = "Avenir Next"),
+      strip.text = element_text(family = "Avenir Next")
+    ) +
+    NULL -> p.linear_fit.by_gene
+p.linear_fit.by_gene
+
+ggsave(
+  p.linear_fit.by_gene,
+  filename = paste0(PARAM$folder.base, "results/linear_fits.by_gene.pdf"),
+  width = 250,
+  height = 250,
+  unit = "mm",
+  scale = 1,
+  device = cairo_pdf
+)
+```
+
 Check parameters for `n.cluster` -> `n.species` regressions.
 
 ```{r, fig.width=8, fig.height=6}
