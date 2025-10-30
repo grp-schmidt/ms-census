@@ -8,6 +8,11 @@
 #Output:
 #rarefaction results for different types of rarefaction runs
 #
+#***
+#
+#**NOTE**: To run code below, downlaod data from Zenodo (DOI 10.5281/zenodo.17482698) and store locally in the according folder structure.
+#
+#***
 ################################################################################
 ################################################################################
 
@@ -279,6 +284,7 @@ for (i in 1:5) {
   )
   
   #Save
+  #NOTE: rarefaction results for all marker genes (files stored in line below) are available via Zenodo as 'rarefaction.by_habitat.incremental.tar.gz'
   save(collect.rarefaction.by_habitat_increment, collect.baseline, file = paste0(folder.data, "/rarefaction.by_habitat.incremental.", mid, ".", cutoff, ".Rdata"))
   ############################################################################
 }
@@ -414,6 +420,7 @@ for (h5.rarefy in c(unique(as.character(dat.sample.rarefy$h5)), "all")) {
   )
   
   #Save
+  #NOTE: rarefaction results for all marker genes (files stored in line below) are available via Zenodo as 'rarefaction.by_habitat.tar.gz'
   save(collect.rarefaction.by_sample, collect.baseline, file = paste0(folder.data, "/rarefaction.by_habitat.", mid, ".", cutoff, ".Rdata"))
   ############################################################################
 }
