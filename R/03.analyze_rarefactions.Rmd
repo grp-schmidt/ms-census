@@ -46,6 +46,12 @@ col.unbinned <-  "#ffffb3"
 
 ## Read data
 
+***
+
+**NOTE**: To run code below, downlaod data from Zenodo (DOI 10.5281/zenodo.17482698) and store locally in the according folder structure.
+
+***
+
 Load sample metadata.
 
 ```{r}
@@ -180,7 +186,7 @@ for (f in curr.files) {
 }
 ```
 
-Generate figure S1: overview of species count estimates across all marker genes
+Generate Extended Figure 2: overview of species count estimates across all marker genes
 
 ```{r, fig.width=8, fig.height=8}
 p.marker_estimates <- res.baseline.incremental %>%
@@ -371,6 +377,83 @@ proc.rarefaction.by_sample <- tmp %>%
   left_join(dat.h5.cat, by = "h5")
 ```
 
+Calculate the coefficient of variation at each rarefaction step for each marker gene, then summarise (this is Extended Figure 1)
+* plot coefficient of variation against rarefaction steps, then show median across marker genes.
+
+```{r, fig.width = 12, fig.height = 8}
+tmp <- res.rarefaction.by_sample %>%
+  #Get HMM info per marker_id
+  left_join(dat.hmm %>% select(marker_id, domain, length_aa), by = "marker_id") %>%
+  filter(marker_id %in% c(use.marker_id, use.marker_id.arch)) %>%
+  #Reshape data and transform n.cluster -> n.species with estimates specific for marker_id and for data source
+  select(domain, marker_id, cutoff, h5, step, i, glob.pg3, glob.gtdb_r220.unique, n.spire.mag, n.spire.unbinned.non_singleton.unique, n.spire.unbinned.unique) %>%
+  pivot_longer(glob.pg3:n.spire.unbinned.unique) %>%
+  mutate(
+    use.model = case_when(
+      grepl("pg3", name) ~ "pg3",
+      grepl("gtdb_", name) ~ "gtdb_r220",
+      T ~ "spire.ani_cluster"
+    )
+  ) %>%
+  left_join(lm.cluster_species %>% select(marker_id, cutoff, source, estimate), by = c("marker_id" = "marker_id", "cutoff" = "cutoff", "use.model" = "source")) %>%
+  mutate(n.species = value * estimate) %>%
+  #Re-calculate species estimates as "composites" of the various values
+  select(domain:name, n.species) %>%
+  pivot_wider(names_from = "name", values_from = "n.species")
+
+tmp.proc <- tmp %>%
+  filter(h5 == "all") %>%
+  group_by(domain, marker_id, step) %>%
+  summarise(across(glob.pg3:n.spire.unbinned.unique, ~ sd(.x, na.rm=T) / mean(.x, na.rm=T)))
+
+tmp.proc %>%
+  pivot_longer(glob.pg3:n.spire.unbinned.unique) %>%
+  mutate(
+    variable = case_when(
+      name == "glob.pg3" ~ "proGenomes3",
+      name == "glob.gtdb_r220.unique" ~ "GTDB r220",
+      name == "n.spire.mag" ~ "SPIRE MAGs",
+      name == "n.spire.unbinned.non_singleton.unique" ~ "SPIRE unbinned (non-singl.)",
+      name == "n.spire.unbinned.unique" ~ "SPIRE unbinned"
+    )
+  ) %>%
+  mutate(variable = fct_relevel(variable, c("proGenomes3", "GTDB r220", "SPIRE MAGs", "SPIRE unbinned (non-singl.)", "SPIRE unbinned"))) %>%
+  ggplot(aes(x = step, y = value, group = interaction(marker_id, variable), colour = variable)) +
+  geom_hline(yintercept = c(0.01, 0.05, 0.1), colour = "darkgrey", linetype = "dashed") +
+  geom_line(alpha = 0.05) +
+  geom_line(
+    data = . %>% group_by(domain, step, variable) %>% summarise(value = median(value)),
+    aes(group = variable)
+  ) +
+  scale_x_continuous(trans = "log10", name = "n of samples") +
+  scale_y_continuous(trans = "sqrt", name = "coefficient of variation") +
+  scale_colour_manual(values = c(col.pg3, col.gtdb, col.spire.mag, col.unbinned.non_singleton, col.unbinned)) +
+  facet_grid(domain ~ variable, scales = "free_x") +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_line(linewidth = 0.1, colour = "#d9d9d9"),
+    panel.grid.major = element_line(linewidth = 0.2, colour = "#d9d9d9"),
+    axis.title = element_text(family = "Avenir Next"),
+    axis.text = element_text(family = "Avenir Next", size = 6),
+    legend.text = element_text(family = "Avenir Next"),
+    legend.title = element_text(family = "Avenir Next"),
+    strip.text = element_text(family = "Avenir Next")
+  ) +
+  NULL -> p.rarefactiion.coef_variation
+p.rarefactiion.coef_variation
+
+ggsave(
+  p.rarefactiion.coef_variation,
+  file = paste0(PARAM$folder.base, "manuscript/rarefaction.coefficient_of_variation.pdf"),
+  device = cairo_pdf,
+  width = 300,
+  height = 200,
+  unit = "mm"
+)
+```
+
+
 Calculate n of novel species discovered per sample added, fit Heap's law and extract coefficients
 * per marker gene, summarised across iterations
 
@@ -420,6 +503,50 @@ proc.rarefaction.heap <- tmp %>%
   ungroup()
 ```
 
+Plot linear fits for species discovery coefficients (Extended Figure 9).
+
+```{r, fig.width=16, fig.height=16}
+tmp.heap %>%
+  ungroup() %>%
+  filter(h5 == "all") %>%
+  filter(marker_id %in% c(sample(use.marker_id, 5), sample(use.marker_id.arch, 5))) %>%
+  ggplot(aes(x = step.log, y = value, group = interaction(marker_id, name), colour = name, fill = name)) +
+  geom_point(
+    shape = 21,
+    size = 2,
+    alpha = 0.7,
+    colour = "darkgrey"
+  ) +
+  geom_smooth(method = "lm", se = F) +
+  scale_colour_manual(values = c(col.gtdb, col.pg3, col.spire.mag, col.unbinned, col.unbinned.non_singleton)) +
+  scale_fill_manual(values = c(col.gtdb, col.pg3, col.spire.mag, col.unbinned, col.unbinned.non_singleton)) +
+  xlab("log(rarefaction step)") +
+  ylab("log(n of species added)") +
+  facet_grid(domain + marker_id ~ name) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_line(linewidth = 0.1, colour = "#d9d9d9"),
+    panel.grid.major = element_line(linewidth = 0.2, colour = "#d9d9d9"),
+    axis.title = element_text(family = "Avenir Next"),
+    axis.text = element_text(family = "Avenir Next", size = 6),
+    legend.text = element_text(family = "Avenir Next"),
+    legend.title = element_text(family = "Avenir Next"),
+    strip.text = element_text(family = "Avenir Next")
+  ) +
+  NULL -> p.linear_fit.species_discovery
+p.linear_fit.species_discovery
+
+ggsave(
+  p.linear_fit.species_discovery,
+  file = paste0(PARAM$folder.base, "manuscript/rarefaction.species_discovery.linear_fit.pdf"),
+  device = cairo_pdf,
+  width = 210,
+  height = 210,
+  unit = "mm"
+)
+```
+
 Get species discovered per sample added.
 
 ```{r}
@@ -453,7 +580,7 @@ proc.rarefaction.all %>%
 
 Plot rarefaction curves.
 
-S figure 2: rarefaction curves by habitat, Archaea.
+S figure 1: rarefaction curves by habitat, Archaea.
 
 ```{r, fig.width=16, fig.height=16}
 proc.rarefaction.all %>%
@@ -511,7 +638,7 @@ p.rarefactiion.archaea.by_habitat
 ggsave(p.rarefactiion.archaea.by_habitat, file = paste0(PARAM$folder.base, "manuscript/figure.S2.pdf"), device = cairo_pdf, width = 400, height = 320, unit = "mm")
 ```
 
-S figure 3: rarefaction curves by habitat, Bacteria
+S figure 2: rarefaction curves by habitat, Bacteria
 
 ```{r, fig.width=16, fig.height=16}
 proc.rarefaction.all %>%
@@ -725,7 +852,7 @@ p.rarefaction.bacteria
 ggsave(p.rarefaction.bacteria, file = paste0(PARAM$folder.base, "manuscript/figure.rarefaction_all/rarefaction.all.bac.svg"), width = 90, height = 90, unit = "mm")
 ```
 
-Generate scatter plot of "number of samples" versus "species discovered" for each habitat
+Generate scatter plot of "number of samples" versus "species discovered" for each habitat (Figure 1B)
 
 ```{r, fig.width=6, fig.height=6}
 library(ggh4x)
@@ -884,7 +1011,7 @@ proc.rarefaction.all %>%
 ```
 
 
-Plot "alpha" values for species collection per habitat, per data source.
+Plot "alpha" values for species collection per habitat, per data source (Figure 1C)
 
 ```{r, fig.width=10, fig.height=6}
 proc.rarefaction.heap %>%
@@ -938,6 +1065,8 @@ p.alpha
 
 ggsave(p.alpha, file = paste0(PARAM$folder.base, "manuscript/figure.rarefaction_all/alpha.all.svg"), width = 180, height = 100, unit = "mm")
 ```
+
+
 
 ## Incremental rarefactions across habitats
 
@@ -1300,6 +1429,456 @@ p.rarefy.incremental.arch
 ggsave(p.rarefy.incremental.arch, file = paste0(PARAM$folder.base, "manuscript/figure.rarefaction_incremental/rarefaction.incremental.arch.svg"), width = 180, height = 40, unit = "mm", dpi = 300)
 ```
 
+# Genome cluster size distributions
+
+Get cumulative plots of genome cluster sizes based on data source, for PG3, GTDB, SPIRE MAGs and SPIRE unbinned. Mark out area where only singletons are added. These are the results and plots underlying Extended Figure 4.
+
+```{r}
+#Create sub-environment into which workspaces will be loaded
+cumsum.env <- new.env(parent = baseenv())
+
+collect.cumsum.pg3 <- collect.cumsum.gtdb <- collect.cumsum.mag <- collect.cumsum.unbinned <- tibble()
+for (mid in use.marker_id$marker_id) {
+  writeLines(paste(date(), "=>", mid))
+  
+  load(paste0(PARAM$folder.base, "data/hmm_gtdb207/clustering/", mid, ".spire_gtdb.clustered.965.Rdata"), envir = cumsum.env)
+  
+  curr.dat.cluster <- cumsum.env$dat.clustering.by_gene %>%
+    group_by(cluster, source) %>%
+    tally %>%
+    ungroup() %>%
+    pivot_wider(names_from = "source", values_from = "n", values_fill = 0) %>%
+    mutate(marker_id = mid)
+
+  collect.cumsum.pg3 <- bind_rows(
+    collect.cumsum.pg3,
+    curr.dat.cluster %>%
+    filter(pg3 > 0) %>%
+    mutate(
+      category = case_when(
+        spire.mag == 0 & spire.unbinned == 0 ~ "ref.only",
+        spire.mag > 0 ~ "in.mag",
+        T ~ "in.unbinned"
+      )
+    ) %>%
+    mutate(category = fct_relevel(category, c(
+      "in.mag",
+      "in.unbinned",
+      "ref.only"
+      ))) %>%
+    arrange(category, desc(pg3)) %>%
+    mutate(
+      rank.cluster = (1:n()) / n(),
+      rank.genome = cumsum(pg3) / sum(pg3),
+      is_singleton = pg3 == 1
+    )
+  )
+  
+  collect.cumsum.gtdb <- bind_rows(
+    collect.cumsum.gtdb,
+    curr.dat.cluster %>%
+    filter(gtdb_r220 > 0) %>%
+    mutate(
+      category = case_when(
+        spire.mag == 0 & spire.unbinned == 0 ~ "ref.only",
+        spire.mag > 0 ~ "in.mag",
+        T ~ "in.unbinned"
+      )
+    ) %>%
+    mutate(category = fct_relevel(category, c(
+      "in.mag",
+      "in.unbinned",
+      "ref.only"
+      ))) %>%
+    arrange(category, desc(gtdb_r220)) %>%
+    mutate(
+      rank.cluster = (1:n()) / n(),
+      rank.genome = cumsum(gtdb_r220) / sum(gtdb_r220),
+      is_singleton = gtdb_r220 == 1
+    )
+  )
+  
+  collect.cumsum.mag <- bind_rows(
+    collect.cumsum.mag,
+    curr.dat.cluster %>%
+    filter(spire.mag > 0) %>%
+    mutate(
+      category = case_when(
+        pg3 > 0 | gtdb_r220 > 0 ~ "in.ref",
+        T ~ "mag_or_unbinned"
+      )
+    ) %>%
+    mutate(category = fct_relevel(category, c(
+      "in.ref",
+      "mag_or_unbinned"
+      ))) %>%
+    arrange(category, desc(spire.mag)) %>%
+    mutate(
+      rank.cluster = (1:n()) / n(),
+      rank.genome = cumsum(spire.mag) / sum(spire.mag),
+      is_singleton = spire.mag == 1
+    )
+  )
+  
+  collect.cumsum.unbinned <- bind_rows(
+    collect.cumsum.unbinned,
+    curr.dat.cluster %>%
+    filter(spire.unbinned > 0) %>%
+    mutate(
+      category = case_when(
+        pg3 > 0 | gtdb_r220 > 0 ~ "in.ref",
+        spire.mag > 0 ~ "in.mag",
+        T ~ "unbinned.only"
+      )
+    ) %>%
+    mutate(category = fct_relevel(category, c(
+      "in.ref",
+      "in.mag",
+      "unbinned.only"
+      ))) %>%
+    arrange(category, desc(spire.unbinned)) %>%
+    mutate(
+      rank.cluster = (1:n()) / n(),
+      rank.genome = cumsum(spire.unbinned) / sum(spire.unbinned),
+      is_singleton = spire.unbinned == 1
+    )
+  )
+}
+```
+
+
+Generate plot(s) for PG3.
+
+```{r}
+#Find marker gene with 'median' curve
+curr.median.mid <- collect.cumsum.pg3 %>%
+  group_by(marker_id, category) %>%
+  slice_max(rank.cluster, n = 1) %>%
+  ungroup() %>%
+  left_join(tmp.marker_id, by = "marker_id") %>%
+  filter(category == "in.mag") %>%
+  group_by(domain) %>%
+  mutate(dist.to.median = abs(rank.cluster - median(rank.cluster))) %>%
+  slice_min(dist.to.median) %>%
+  slice_sample(n = 1) %>%
+  pull(marker_id)
+
+p.cumsum.pg3 <- collect.cumsum.pg3 %>%
+  left_join(tmp.marker_id, by = "marker_id") %>%
+  ggplot(aes(x = rank.cluster, y = rank.genome, group = marker_id)) +
+  #Rectangles around category series
+  geom_rect(
+    data = . %>%
+      filter(marker_id == curr.median.mid) %>%
+      group_by(domain, category) %>%
+      summarise(
+        cluster.min = min(rank.cluster),
+        cluster.max = max(rank.cluster),
+        genome.min = min(rank.genome),
+        genome.max = max(rank.genome)
+      ),
+    aes(x = NULL, y = NULL, xmin = cluster.min, xmax = cluster.max, ymin = genome.min, ymax = genome.max, fill = category, group = interaction(domain, category)),
+    alpha = 0.1,
+    linetype = "dashed"
+  ) +
+  #Rectangles around singleton clusters
+  geom_rect(
+    data = . %>%
+      filter(marker_id == curr.median.mid) %>%
+      filter(is_singleton) %>%
+      group_by(domain, category) %>%
+      summarise(
+        cluster.min = min(rank.cluster),
+        cluster.max = max(rank.cluster),
+        genome.min = min(rank.genome),
+        genome.max = max(rank.genome)
+      ),
+    aes(x = NULL, y = NULL, xmin = cluster.min, xmax = cluster.max, ymin = genome.min, ymax = genome.max, fill = category, group = interaction(domain, category)),
+    alpha = 0.3
+  ) +
+  #Background of all data series
+  geom_line(
+    colour = "darkgrey",
+    alpha = 0.2,
+    linewidth = 0.2
+  ) +
+  #Mark out median line
+  geom_line(
+    data = . %>%
+      filter(marker_id == curr.median.mid),
+    aes(colour = category, group = NULL),
+    linewidth = 0.5,
+    colour = "#737373"
+  ) +
+  #Mark out horizontal borders of median line
+  geom_hline(
+    data = . %>%
+      filter(marker_id == curr.median.mid) %>%
+      group_by(domain, category) %>%
+      slice_max(rank.genome),
+    aes(yintercept = rank.genome, colour = category, group = interaction(domain, category)),
+    linetype = "dashed",
+    linewidth = 0.3
+  ) +
+  #Mark out vertical borders of median line
+  geom_vline(
+    data = . %>%
+      filter(marker_id == curr.median.mid) %>%
+      group_by(domain, category) %>%
+      slice_max(rank.cluster),
+    aes(xintercept = rank.cluster, colour = category, group = interaction(domain, category)),
+    linetype = "dashed",
+    linewidth = 0.3
+  ) +
+  scale_colour_manual(values = c(col.spire.mag, col.unbinned.non_singleton, col.pg3)) +
+  scale_fill_manual(values = c(col.spire.mag, col.unbinned.non_singleton, col.pg3)) +
+  xlab("genome cluster (ranked)") +
+  ylab("cumulative n of genomes") +
+  facet_grid(domain ~ .) +
+  theme_minimal(base_family = "Avenir Next") +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "darkgrey"),
+    #axis.title = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.title = element_blank(),
+    axis.text = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_blank()
+  ) +
+  NULL
+#p.cumsum.pg3
+
+ggsave(
+  p.cumsum.pg3,
+  filename = paste0(PARAM$folder.base, "results/cumsum.pg3.pdf"),
+  width = 60,
+  height = 120,
+  unit = "mm",
+  device = cairo_pdf
+)
+```
+
+Generate plot(s) for SPIRE MAGs.
+
+```{r}
+#Find marker gene with 'median' curve
+curr.median.mid <- collect.cumsum.mag %>%
+  left_join(tmp.marker_id, by = "marker_id") %>%
+  group_by(marker_id, category) %>%
+  slice_max(rank.cluster, n = 1) %>%
+  ungroup() %>%
+  filter(category == "in.ref") %>%
+  group_by(domain) %>%
+  mutate(dist.to.median = abs(rank.cluster - median(rank.cluster))) %>%
+  slice_min(dist.to.median) %>%
+  slice_sample(n = 1) %>%
+  pull(marker_id)
+
+p.cumsum.mag <- collect.cumsum.mag %>%
+  left_join(tmp.marker_id, by = "marker_id") %>%
+  ggplot(aes(x = rank.cluster, y = rank.genome, group = marker_id)) +
+  #Rectangles around category series
+  geom_rect(
+    data = . %>%
+      filter(marker_id == curr.median.mid) %>%
+      group_by(domain, category) %>%
+      summarise(
+        cluster.min = min(rank.cluster),
+        cluster.max = max(rank.cluster),
+        genome.min = min(rank.genome),
+        genome.max = max(rank.genome)
+      ),
+    aes(x = NULL, y = NULL, xmin = cluster.min, xmax = cluster.max, ymin = genome.min, ymax = genome.max, fill = category, group = interaction(domain, category)),
+    alpha = 0.1,
+    linetype = "dashed"
+  ) +
+  #Rectangles around singleton clusters
+  geom_rect(
+    data = . %>%
+      filter(marker_id == curr.median.mid) %>%
+      filter(is_singleton) %>%
+      group_by(domain, category) %>%
+      summarise(
+        cluster.min = min(rank.cluster),
+        cluster.max = max(rank.cluster),
+        genome.min = min(rank.genome),
+        genome.max = max(rank.genome)
+      ),
+    aes(x = NULL, y = NULL, xmin = cluster.min, xmax = cluster.max, ymin = genome.min, ymax = genome.max, fill = category, group = interaction(domain, category)),
+    alpha = 0.3
+  ) +
+  #Background of all data series
+  geom_line(
+    colour = "darkgrey",
+    alpha = 0.2,
+    linewidth = 0.2
+  ) +
+  #Mark out median line
+  geom_line(
+    data = . %>%
+      filter(marker_id == curr.median.mid),
+    aes(colour = category, group = NULL),
+    linewidth = 0.5,
+    colour = "#737373"
+  ) +
+  #Mark out horizontal borders of median line
+  geom_hline(
+    data = . %>%
+      filter(marker_id == curr.median.mid) %>%
+      group_by(domain, category) %>%
+      slice_max(rank.genome),
+    aes(yintercept = rank.genome, colour = category, group = interaction(domain, category)),
+    linetype = "dashed",
+    linewidth = 0.3
+  ) +
+  #Mark out vertical borders of median line
+  geom_vline(
+    data = . %>%
+      filter(marker_id == curr.median.mid) %>%
+      group_by(domain, category) %>%
+      slice_max(rank.cluster),
+    aes(xintercept = rank.cluster, colour = category, group = interaction(domain, category)),
+    linetype = "dashed",
+    linewidth = 0.3
+  ) +
+  scale_colour_manual(values = c(col.pg3, col.spire.mag)) +
+  scale_fill_manual(values = c(col.pg3, col.spire.mag)) +
+  xlab("genome cluster (ranked)") +
+  ylab("cumulative n of genomes") +
+  facet_grid(domain ~ .) +
+  theme_minimal(base_family = "Avenir Next") +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "darkgrey"),
+    #axis.title = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.title = element_blank(),
+    axis.text = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_blank()
+  ) +
+  NULL
+#p.cumsum.mag
+
+ggsave(
+  p.cumsum.mag,
+  filename = paste0(PARAM$folder.base, "results/cumsum.mag.pdf"),
+  width = 60,
+  height = 120,
+  unit = "mm",
+  device = cairo_pdf
+)
+```
+
+Generate plot(s) for SPIRE unbinned contigs.
+
+```{r}
+#Find marker gene with 'median' curve
+curr.median.mid <- collect.cumsum.unbinned %>%
+  left_join(tmp.marker_id, by = "marker_id") %>%
+  group_by(marker_id, category) %>%
+  slice_max(rank.cluster, n = 1) %>%
+  ungroup() %>%
+  filter(category == "in.ref") %>%
+  group_by(domain) %>%
+  mutate(dist.to.median = abs(rank.cluster - median(rank.cluster))) %>%
+  slice_min(dist.to.median) %>%
+  slice_sample(n = 1) %>%
+  pull(marker_id)
+
+p.cumsum.unbinned <- collect.cumsum.unbinned %>%
+  left_join(tmp.marker_id, by = "marker_id") %>%
+  ggplot(aes(x = rank.cluster, y = rank.genome, group = marker_id)) +
+  #Rectangles around category series
+  geom_rect(
+    data = . %>%
+      filter(marker_id == curr.median.mid) %>%
+      group_by(domain, category) %>%
+      summarise(
+        cluster.min = min(rank.cluster),
+        cluster.max = max(rank.cluster),
+        genome.min = min(rank.genome),
+        genome.max = max(rank.genome)
+      ),
+    aes(x = NULL, y = NULL, xmin = cluster.min, xmax = cluster.max, ymin = genome.min, ymax = genome.max, fill = category, group = interaction(domain, category)),
+    alpha = 0.1,
+    linetype = "dashed"
+  ) +
+  #Rectangles around singleton clusters
+  geom_rect(
+    data = . %>%
+      filter(marker_id == curr.median.mid) %>%
+      filter(is_singleton) %>%
+      group_by(domain, category) %>%
+      summarise(
+        cluster.min = min(rank.cluster),
+        cluster.max = max(rank.cluster),
+        genome.min = min(rank.genome),
+        genome.max = max(rank.genome)
+      ),
+    aes(x = NULL, y = NULL, xmin = cluster.min, xmax = cluster.max, ymin = genome.min, ymax = genome.max, fill = category, group = interaction(domain, category)),
+    alpha = 0.3
+  ) +
+  #Background of all data series
+  geom_line(
+    colour = "darkgrey",
+    alpha = 0.2,
+    linewidth = 0.2
+  ) +
+  #Mark out median line
+  geom_line(
+    data = . %>%
+      filter(marker_id == curr.median.mid),
+    aes(colour = category, group = NULL),
+    linewidth = 0.5,
+    colour = "#737373"
+  ) +
+  #Mark out horizontal borders of median line
+  geom_hline(
+    data = . %>%
+      filter(marker_id == curr.median.mid) %>%
+      group_by(domain, category) %>%
+      slice_max(rank.genome),
+    aes(yintercept = rank.genome, colour = category, group = interaction(domain, category)),
+    linetype = "dashed",
+    linewidth = 0.3
+  ) +
+  #Mark out vertical borders of median line
+  geom_vline(
+    data = . %>%
+      filter(marker_id == curr.median.mid) %>%
+      group_by(domain, category) %>%
+      slice_max(rank.cluster),
+    aes(xintercept = rank.cluster, colour = category, group = interaction(domain, category)),
+    linetype = "dashed",
+    linewidth = 0.3
+  ) +
+  scale_colour_manual(values = c(col.pg3, col.spire.mag, col.unbinned.non_singleton)) +
+  scale_fill_manual(values = c(col.pg3, col.spire.mag, col.unbinned.non_singleton)) +
+  xlab("genome cluster (ranked)") +
+  ylab("cumulative n of genomes") +
+  facet_grid(domain ~ .) +
+  theme_minimal(base_family = "Avenir Next") +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "darkgrey"),
+    #axis.title = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.title = element_blank(),
+    axis.text = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_blank()
+  ) +
+  NULL
+#p.cumsum.unbinned
+
+ggsave(
+  p.cumsum.unbinned,
+  filename = paste0(PARAM$folder.base, "results/cumsum.unbinned.pdf"),
+  width = 60,
+  height = 120,
+  unit = "mm",
+  device = cairo_pdf
+)
+```
 
 
 
