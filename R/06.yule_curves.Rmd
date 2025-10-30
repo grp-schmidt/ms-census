@@ -1,0 +1,1346 @@
+---
+title: "Census of discoverable diversity: Analyses"
+author: "Vishnu Prasoodanan, Oleks Maistrenko & Sebastian Schmidt"
+date: "2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(stringsAsFactors = FALSE)
+```
+
+## Prepare environment
+
+```{r}
+library(tidyverse)
+library(taxizedb)
+library(extrafont)
+library(RPostgreSQL)
+extrafont::loadfonts()
+```
+
+Set paths and parameters.
+
+```{r}
+#Preallocate global data structures
+PARAM <- list()
+
+#Set relevant folder names
+PARAM$folder.Rmd <- paste0(getwd(), "/")
+PARAM$folder.base <- gsub("Rmd/", "", PARAM$folder.Rmd)
+PARAM$folder.data <- paste0(PARAM$folder.base, "data/")
+```
+
+# Load data
+
+## Load and prepare GTDB data.
+
+**NOTE**: taxonomies for GTDB downloaded directly from gtdb.ecogenomic.org
+
+Archaea.
+
+```{r}
+dat.gtdb.archaea <- read_tsv(paste0(PARAM$folder.data, "gtdb_r226/ar53_taxonomy.tsv"), col_names = c("accession", "taxonomy")) %>%
+  separate(taxonomy, into = c("domain", "phylum", "class", "order", "family", "genus", "species"), sep = ";") %>%
+  group_by(domain, phylum, class, order, family, genus, species) %>%
+  tally %>%
+  ungroup() %>%
+  arrange(domain, phylum, class, order, family, genus, species)
+```
+
+Bacteria
+
+```{r}
+dat.gtdb.bacteria <- read_tsv(paste0(PARAM$folder.data, "gtdb_r226/bac120_taxonomy.tsv"), col_names = c("accession", "taxonomy")) %>%
+  separate(taxonomy, into = c("domain", "phylum", "class", "order", "family", "genus", "species"), sep = ";") %>%
+  group_by(domain, phylum, class, order, family, genus, species) %>%
+  tally %>%
+  arrange(domain, phylum, class, order, family, genus, species) %>%
+  ungroup()
+```
+
+Store.
+
+```{r}
+save(dat.gtdb.archaea, dat.gtdb.bacteria, file = paste0(PARAM$folder.data, "dat.clade_sizes.gtdb.Rdata"))
+```
+
+## Load and prepare Microbe Atlas OTU data (mapref-v3.0)
+
+**NOTE**: `mapref` downloaded directly from microbe-atlas.org
+
+```{r}
+dat.mapref <- read_tsv(paste0(PARAM$folder.data, "mapref_v3.0/otus.info")) %>%
+  filter(grepl("99_", OTU)) %>%
+  separate(OTU, into = c("lev_90", "lev_96", "lev_97", "lev_98", "lev_99"), sep = ";") %>%
+  arrange(lev_90, lev_96, lev_97, lev_98, lev_99)
+```
+
+Store.
+
+```{r}
+save(dat.mapref, file = paste0(PARAM$folder.data, "dat.clade_sizes.mapref.Rdata"))
+```
+
+## Load and prepare GBIF
+
+```{r}
+path.gbif <- db_download_gbif()
+#path.gbif <- "~/Library/Caches/R/taxizedb/gbif.sqlite"
+
+src <- src_gbif()
+
+tmp.gbif <- tbl(src, "gbif") %>%
+  as_tibble() %>%
+  select(taxonID, kingdom, phylum, class, order, family, genus, scientificName, canonicalName, taxonRank, parentNameUsageID, acceptedNameUsageID, originalNameUsageID, taxonomicStatus) %>%
+  filter(!is.na(phylum) & !is.na(class) & !is.na(order) & !is.na(family) & !is.na(genus))
+```
+
+Store.
+
+```{r}
+save(dat.gbif, file = paste0(PARAM$folder.data, "dat.clade_sizes.gbif.Rdata"))
+```
+
+## Load and prepare SPIRE-derived data
+
+This step re-analyses annotated marker gene phylogenies to compute per-phylum clade size distributions; i.e., rather than fitting Yule curves for all genera within Bacteria / Archaea, we fit them within each bacterial / archaeal phylum.
+
+First, process archaeal trees:
+
+* loop through marker genes, re-load tree data
+* loop through (predicted) phylum-level nodes and assign taxonomic label based on underlying classifications
+* resolve special cases with conflicting taxonomies
+* find descendant genus-level nodes
+* collect clade sizes (i.e., tips per genus-level node)
+
+```{r}
+#Create sub-environment into which workspaces will be loaded
+tree.env <- new.env(parent = baseenv())
+
+collect.clade_sizes.arc <- tibble()
+
+#Loop through retained marker IDs
+for (mid in use.marker_id.arch) {
+  writeLines(paste(date(), "=>", mid))
+  
+  #Load current workspace into sub-environment
+  load(paste0(PARAM$folder.data, mid, "_workspaceTaxonomyPredictions_v3.RData"), envir = tree.env)
+  load(paste0("data/hmm_gtdb.clustering/", mid, ".spire_gtdb.clustered.965.Rdata"), envir = tree.env)
+  
+  tmp.idx <- tibble(
+    node = tree.env$rootedByMidPointLabeled$node.label,
+    node.idx = 1:Nnode(tree.env$rootedByMidPointLabeled) + Ntip(tree.env$rootedByMidPointLabeled)
+  )
+  
+  #Get all current nodes that are nodes (and not tips)
+  curr.nodes <- tree.env$collect.clade_sizes %>%
+    select(level, node) %>%
+    distinct() %>%
+    filter(grepl("Node", node)) %>%
+    left_join(tmp.idx, by = "node")
+  
+  #Get current phyla with ≥5 tips from MAGs
+  tmp.phyla <- tree.env$collect.clade_sizes %>%
+    filter(level == "phylum") %>%
+    group_by(node) %>%
+    summarise(n = sum(n, na.rm = T)) %>%
+    filter(n >= 5) %>%
+    pull(node)
+  
+  #Find ancestral phyla for all predicted genera
+  tmp.ancestors <- tree.env$collect.clade_sizes %>%
+    filter(level == "genus") %>%
+    select(node, level) %>%
+    distinct() %>%
+    #Get all ancestors for every genus node
+    rowwise() %>%
+    mutate(
+      ancestors = list(Ancestors(tree.env$rootedByMidPointLabeled, node, type = "all"))
+    ) %>%
+    unnest(ancestors) %>%
+    filter(ancestors %in% curr.nodes$node.idx)
+  
+  tmp.ancestors.wide <- tmp.ancestors %>%
+    left_join(curr.nodes %>% filter(level != "genus"), by = c("ancestors" = "node.idx"), ) %>%
+    select(-ancestors) %>%
+    pivot_wider(names_from = "level.y", values_from = "node.y") %>%
+    mutate(
+      phylum = ifelse(is.na(phylum), node.x, phylum),
+      class = ifelse(is.na(class), node.x, class),
+      order = ifelse(is.na(order), node.x, order),
+      family = ifelse(is.na(family), node.x, family),
+    )
+
+  #Iterate through phylum-level nodes
+  for (phy in tmp.phyla) {
+    writeLines(paste(date(), "=>", mid, phy))
+    
+    curr.tips <- tree.env$rootedByMidPointLabeled$tip.label[Descendants(tree.env$rootedByMidPointLabeled, phy, type = "tips")[[1]]]
+    curr.n.tips <- length(curr.tips)
+    
+    tmp.phy.tax <- tree.env$dat.tree.tips %>%
+      filter(raw.tip.label %in% curr.tips) %>%
+      group_by(phylum) %>%
+      tally %>%
+      filter(!is.na(phylum))
+    
+    curr.consensus_tax <- paste0("NOVEL_", phy)
+    if (nrow(tmp.phy.tax) > 0) {
+      tmp.majority <- tmp.phy.tax %>%
+        mutate(frac = n / sum(n)) %>%
+        arrange(desc(frac)) %>%
+        filter(frac > 0.5) %>%
+        slice_max(frac, n = 1) %>%
+        pull(phylum)
+      
+      if (length(tmp.majority) == 1) {curr.consensus_tax = tmp.majority}
+    }
+    
+    writeLines(paste(date(), "=>", mid, phy, "classified as", curr.consensus_tax))
+    
+    #Pull out current genera and get clade sizes
+    collect.clade_sizes.arc <- bind_rows(
+      collect.clade_sizes.arc,
+      tmp.ancestors.wide %>%
+        filter(phylum == phy) %>%
+        select(node = node.x) %>%
+        left_join(tree.env$collect.clade_sizes %>% filter(level == "genus"), by = "node") %>%
+        group_by(node) %>%
+        summarise(n = sum(n)) %>%
+        mutate(marker_id = mid, phylum = curr.consensus_tax, phy.node = phy) %>%
+        relocate(marker_id, phylum, phy.node, node, n)
+    )
+  }
+}
+
+```
+
+Load pre-processed bacterial trees.
+
+```{r}
+#Create sub-environment into which workspaces will be loaded
+clade_size.env <- new.env(parent = baseenv())
+
+collect.clade_sizes.bac <- tibble()
+for (f in list.files("data/marker_trees/", pattern = "clade_sizes.per_phylum", full.names = T)) {
+  load(f, envir = clade_size.env)
+  
+  collect.clade_sizes.bac <- bind_rows(
+    collect.clade_sizes.bac,
+    clade_size.env$collect.clade_sizes.bac
+  )
+}
+```
+
+Filter.
+
+```{r}
+collect.clade_sizes.filt <- bind_rows(
+  collect.clade_sizes.arc %>%
+    group_by(marker_id, phylum) %>%
+    filter(n() >= 50) %>%
+    ungroup() %>%
+    #Remove mis-annotated genomes
+    filter(phylum != "p__Planctomycetota") %>%
+    mutate(
+      phylum.cat = case_when(
+        grepl("NOVEL", phylum) ~ "novel",
+        T ~ phylum
+      )
+    ) %>%
+    mutate(domain = "Archaea"),
+  collect.clade_sizes.bac %>%
+    group_by(marker_id, phylum) %>%
+    filter(n() >= 100) %>%
+    ungroup() %>%
+    mutate(
+      phylum.cat = case_when(
+        grepl("NOVEL", phylum) ~ "novel",
+        T ~ phylum
+      )
+    ) %>%
+    mutate(domain = "Bacteria")
+)
+```
+
+## Prepare data for Willis and Yule fits
+
+**NOTE**: the `*.Rdata` files (re-)loaded in this section contain data as prepared above, but were uploaded to Zenodo (see `README`) for convenience.
+
+SPIRE-derived sets.
+
+```{r}
+load(paste0(PARAM$folder.data, "dat.clade_sizes.spire.Rdata"))
+
+dat.c_s.spire <- bind_rows(
+  spire.clade.sizes.arc %>%
+    filter(level == "genus") %>%
+    group_by(marker_id, node) %>%
+    summarise(size = sum(size)) %>%
+    mutate(domain = "Archaea") %>%
+    ungroup(),
+  spire.clade.sizes.bac %>%
+    filter(level == "genus") %>%
+    group_by(marker_id, node) %>%
+    summarise(size = sum(size)) %>%
+    mutate(domain = "Bacteria") %>%
+    ungroup()
+)
+```
+
+Phylum-resolved SPIRE data.
+
+```{r}
+dat.c_s.spire.phylum <- collect.clade_sizes.filt %>%
+  select(-phy.node)
+```
+
+GTDB data.
+
+```{r}
+load(paste0(PARAM$folder.data, "dat.clade_sizes.gtdb.Rdata"))
+
+dat.c_s.gtdb <- bind_rows(
+  dat.gtdb.archaea,
+  dat.gtdb.bacteria
+) %>%
+  group_by(domain, phylum, class, order, family, genus) %>%
+  tally %>%
+  ungroup()
+```
+
+Microbe Atlas.
+Rationale: set 90% similarity OTUs as approx. genus-level, then count the unique "species"-level OTUs at different levels 96, 97, 98, 99%. In other words, how many different "species" (defined at 96, 97, 98, 99% similarity OTUs) are observed per 90% OTU "genus".
+
+```{r}
+load(paste0(PARAM$folder.data, "dat.clade_sizes.mapref.Rdata"))
+
+dat.c_s.mapref <- bind_rows(
+  dat.mapref %>% select(lev_90, lev_99) %>% distinct() %>% group_by(lev_90) %>% tally %>% mutate(level = "99"),
+  dat.mapref %>% select(lev_90, lev_98) %>% distinct() %>% group_by(lev_90) %>% tally %>% mutate(level = "98"),
+  dat.mapref %>% select(lev_90, lev_97) %>% distinct() %>% group_by(lev_90) %>% tally %>% mutate(level = "97"),
+  dat.mapref %>% select(lev_90, lev_96) %>% distinct() %>% group_by(lev_90) %>% tally %>% mutate(level = "96")
+)
+```
+
+GBIF.
+
+```{r}
+load(paste0(PARAM$folder.data, "dat.clade_sizes.gbif.Rdata"))
+
+dat.c_s.gbif <- dat.gbif %>%
+  group_by(kingdom, phylum, class, order, family, genus) %>%
+  tally %>%
+  ungroup()
+```
+
+## Fit Willis and Yule functions to data
+
+First, get a concatenated and harmonized set of genus sizes (n of "species" per "genus")
+
+```{r}
+dat.c_s.genus <- bind_rows(
+  #SPIRE data
+  dat.c_s.spire %>%
+    rename(genus = node) %>%
+    mutate(series = paste0("spire.", tolower(domain), ".", marker_id)) %>%
+    select(series, genus, size),
+  #SPIRE phyla
+  dat.c_s.spire.phylum %>%
+    rename(genus = node) %>%
+    mutate(series = paste0("spire_by_phylum.", tolower(domain), ".", str_remove(phylum.cat, "p__"), ".", marker_id)) %>%
+    select(series, genus, size = n),
+  #GTDB
+  dat.c_s.gtdb %>%
+    mutate(domain = str_remove(domain, "d__")) %>%
+    mutate(series = paste0("gtdb.", tolower(domain))) %>%
+    select(series, genus, size = n),
+  #MicrobeAtlas
+  dat.c_s.mapref %>%
+    mutate(series = paste0("mapref.", level)) %>%
+    select(series, genus = lev_90, size = n),
+  #GBIF
+  dat.c_s.gbif %>%
+    mutate(series = paste0("gbif.", tolower(kingdom))) %>%
+    select(series, genus, size = n)
+)
+```
+
+Fit Willis curves (log-log power law).
+
+```{r}
+fit.genus.willis <- dat.c_s.genus %>%
+  group_by(series, size) %>%
+  tally %>%
+  mutate(size = log10(size), n = log10(n)) %>%
+  group_by(series) %>%
+  nest() %>%
+  mutate(
+    fit = purrr::map(data, ~lm(n ~ size, data = .x) %>% broom::tidy())
+  ) %>%
+  unnest(fit) %>%
+  select(-data) %>%
+  ungroup()
+```
+
+Fit Yule curves.
+
+```{r}
+library(VGAM)
+
+fit.yulesimon <- function(data) {
+  count.vec <- rep(data$size, times = data$n)  
+
+  my.res <- tryCatch({
+    myfit <- suppressWarnings(vglm(count.vec ~ 1, family = yulesimon, na.action = na.omit))
+    mysummary <- summary(myfit)
+    
+    tibble(
+      estimate = coef(myfit)[[1]],
+      rho = exp(estimate),
+      df.total = myfit@df.total,
+      std.error = coef(mysummary)[, "Std. Error"],
+      log.lik = logLik(myfit),
+      z = coef(mysummary)[, "z value"],
+      p = coef(mysummary)[, "Pr(>|z|)"]
+    )
+  },
+    error = function(err) {
+      tibble(
+        estimate = as.numeric(NA),
+        rho = as.numeric(NA),
+        df.total = as.numeric(NA),
+        std.error = as.numeric(NA),
+        log.lik = as.numeric(NA),
+        z = as.numeric(NA),
+        p = as.numeric(NA)
+      )
+    }
+  )
+  
+  return(my.res)
+}
+
+fit.genus.yule <- dat.c_s.genus %>%
+  group_by(series, size) %>%
+  tally %>%
+  group_by(series) %>%
+  nest() %>%
+  mutate(
+    fit = purrr::map(data, ~fit.yulesimon(data = .x))
+  ) %>%
+  unnest(fit) %>%
+  select(-data) %>%
+  ungroup()
+
+#save(dat.c_s.genus, file = "~/Desktop/dat.c_s.genus.Rdata")
+```
+
+Generate plots, for each dataset in turn.
+
+SPIRE by phylum.
+
+```{r, fig.width=8, fig.height=8}
+fit.genus.yule.by_phylum <- fit.genus.yule %>%
+  filter(grepl("by_phylum", series)) %>%
+  separate(series, into = c("DROP", "domain", "phylum", "marker_id"), sep = "\\.") %>%
+  select(-DROP)
+
+fit.genus.willis.by_phylum <- fit.genus.willis %>%
+  filter(grepl("by_phylum", series)) %>%
+  filter(term == "size") %>%
+  select(series, omega = estimate) %>%
+  separate(series, into = c("DROP", "domain", "phylum", "marker_id"), sep = "\\.") %>%
+  select(-DROP) %>%
+  mutate(omega = 0 - omega)
+
+dat.c_s.genus.by_phylum <- dat.c_s.genus %>%
+  filter(grepl("by_phylum", series)) %>%
+  separate(series, into = c("DROP", "domain", "phylum", "marker_id"), sep = "\\.") %>%
+  select(-DROP)
+
+for (mid in unique(fit.genus.yule.by_phylum$marker_id)) {
+  dat.c_s.genus.by_phylum %>%
+    filter(marker_id == mid) %>%
+    group_by(domain, marker_id, phylum, size) %>%
+    tally() %>%
+    mutate(
+      freq = n / sum(n)
+    ) %>%
+    ungroup() %>%
+    left_join(fit.genus.yule.by_phylum, by = c("domain", "marker_id", "phylum")) %>%
+    mutate(freq.yule = dyules(size, shape = rho)) %>%
+    mutate(freq.yule = ifelse(freq.yule < min(freq), NA, freq.yule)) %>%
+    group_by(domain, marker_id, phylum) %>%
+    slice_sample(n = 1000) %>%
+    ungroup() %>%
+    #mutate(series = fct_relevel(series, c("gbif.animalia", "gbif.plantae", "gbif.fungi", "gbif.chromista", "gbif.protozoa", "gbif.bacteria", "gbif.archaea", "gbif.viruses"))) %>%
+    ggplot(aes(x = size, y = freq, group = phylum, colour = phylum)) +
+    #geom_smooth(method = "lm", se = F) +
+    geom_point(
+      shape = 21,
+      colour = "darkgrey",
+      fill = "grey",
+      alpha = 0.3
+    ) +
+    geom_line(
+      aes(y = freq.yule)
+    ) +
+    scale_x_log10() +
+    xlab("number of species in clade") +
+    scale_y_log10() +
+    ylab("number of clades") +
+    ggtitle(paste(mid)) +
+    #scale_colour_brewer(palette = "Paired") +
+    facet_wrap(. ~ phylum, nrow = 3) +
+    theme_minimal() +
+    theme(
+      legend.position = "none"
+    ) -> p.curr
+  
+  ggsave(
+    p.curr,
+    file = paste0(PARAM$folder.base, "results/yule.by_phylum.", mid, ".pdf"),
+    device = cairo_pdf,
+    width = 250,
+    height = 250,
+    unit = "mm"
+  )
+}
+```
+
+Check for an association of `rho` ~ phylum_size (n of species).
+
+```{r, fig.width=5, fig.height=5}
+tmp.phylum.rho_size <- dat.c_s.genus.by_phylum %>%
+  group_by(domain, phylum, marker_id) %>%
+  summarise(n_species = sum(size)) %>%
+  ungroup() %>%
+  mutate(
+    log.n_species = log10(n_species)
+  ) %>%
+  left_join(fit.genus.yule.by_phylum) %>%
+  left_join(fit.genus.willis.by_phylum)
+
+lm(rho ~ marker_id + log.n_species, data = tmp.phylum.rho_size %>% filter(domain == "archaea")) %>%
+  aov() %>%
+  summary()
+
+lm(rho ~ marker_id + log.n_species, data = tmp.phylum.rho_size %>% filter(domain == "bacteria")) %>%
+  aov() %>%
+  summary()
+
+lm(omega ~ marker_id + log.n_species, data = tmp.phylum.rho_size) %>%
+  aov() %>%
+  summary()
+
+tmp.phylum.rho_size %>%
+  group_by(domain, phylum) %>%
+  summarise(
+    across(c(n_species, log.n_species, rho, omega), .fns = median)
+  ) %>%
+  lm(rho ~ log.n_species + domain, data = .) %>%
+  summary
+
+fit.genus.yule.summarised %>%
+  filter(reference %in% c("gtdb", "spire", "gbif", "mapref")) %>%
+  filter(! group %in% c("96", "98", "99")) %>%
+  arrange(desc(value))
+
+tmp.phylum.rho_size %>%
+  group_by(domain, phylum) %>%
+  summarise(
+    across(c(n_species, log.n_species, rho, omega), .fns = median)
+  ) %>%
+  arrange(domain, desc(rho)) %>%
+  summarise(cor = cor(rho, n_species, method = "spearman"))
+```
+
+Generate plot for phyla (Figure 4D)
+
+```{r, fig.width=5, fig.height=5}
+p.yule.phylum_size <- tmp.phylum.rho_size %>%
+  group_by(domain, phylum) %>%
+  summarise(
+    across(c(n_species, log.n_species, rho, omega), .fns = median)
+  ) %>%
+  ggplot(aes(x = n_species, y = rho, group = domain, colour = domain, fill = domain)) +
+  geom_hline(yintercept = 1, colour = "#252525", linewidth = 0.5) +
+  geom_hline(
+    data = fit.genus.yule.summarised %>%
+      filter(reference %in% c("gtdb", "spire", "gbif", "mapref")) %>%
+      filter(! group %in% c("96", "98", "99")) %>%
+      mutate(
+        reference = fct_relevel(reference, c("gtdb", "spire", "gbif", "mapref")),
+        group = fct_relevel(group, c("archaea", "bacteria", "viruses", "protozoa", "chromista", "fungi", "animalia", "plantae"))
+      ),
+    aes(yintercept = value, colour = group),
+    linetype = "dashed",
+    linewidth = 0.3
+  ) +
+  scale_colour_manual(values = c(
+    "#9970ab",
+    "#a6dba0",
+    "#a6cee3",
+    "#1f78b4",
+    "#fdbf6f",
+    "#ff7f00",
+    "#fb9a99",
+    "#33a02c",
+    "#b2df8a")
+  ) +
+  #scale_color_brewer(palette = "Paired") +
+  #Reset to new colour scale for further plots
+  ggnewscale::new_scale_colour() +
+  geom_smooth(
+    method = "lm",
+    se = T,
+    aes(colour = domain, fill = domain)
+  ) +
+  geom_point(
+    shape = 21,
+    colour = "#252525",
+    size = 2,
+    stroke = 0.3
+  ) +
+  scale_x_continuous(
+    trans = "log10",
+    breaks = c(100, 1000, 10000, 100000),
+    labels = c("100", "1,000", "10,000", "100,000")
+  ) +
+  scale_y_continuous(
+    #trans = "sqrt",
+    limits = c(0.5,2),
+    breaks = c(seq(0.5, 1, by = 0.1), seq(1.2, 2, by = 0.2))
+  ) +
+  xlab("est. number of species in phylum") +
+  ylab("Yule coefficient ρ") +
+  scale_fill_manual(values = c("#9970ab", "#a6dba0")) +
+  scale_colour_manual(values = c("#9970ab", "#a6dba0")) +
+  #facet_wrap(domain ~ .) +
+  theme_minimal(base_family = "Avenir Next", base_size = 8) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "darkgrey"),
+    #axis.title.x = element_blank(),
+    axis.title = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.text = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    strip.text.y = element_blank(),
+  ) +
+  NULL
+p.yule.phylum_size
+
+ggsave(
+  p.yule.phylum_size,
+  filename = paste0(PARAM$folder.base, "results/yule.by_phylum_size.pdf"),
+  width = 90,
+  height = 60,
+  unit = "mm",
+  device = cairo_pdf
+)
+```
+
+Generate a combined plot for GBIF, GTDB and Microbe Atlas Project (Extended Figure 7).
+
+```{r, fig.width=8, fig.height=8}
+p.yule.others <- dat.c_s.genus %>%
+  filter(grepl("gbif", series) | grepl("gtdb", series) | series == "mapref.97") %>%
+  group_by(series, size) %>%
+  tally() %>%
+  mutate(
+    freq = n / sum(n)
+  ) %>%
+  left_join(fit.genus.yule, by = "series") %>%
+  mutate(freq.yule = dyules(size, shape = rho)) %>%
+  mutate(freq.yule = ifelse(freq.yule < min(freq), NA, freq.yule)) %>%
+  group_by(series) %>%
+  slice_sample(n = 1000) %>%
+  ungroup() %>%
+  mutate(series = fct_relevel(series, c("gbif.animalia", "gbif.plantae", "gbif.fungi", "gbif.chromista", "gbif.protozoa", "gbif.viruses", "gbif.bacteria", "gbif.archaea", "gtdb.bacteria", "gtdb.archaea", "mapref.97"))) %>%
+  ggplot(aes(x = size, y = freq, group = series, colour = series)) +
+  #geom_smooth(method = "lm", se = F) +
+  geom_point(
+    shape = 21,
+    colour = "darkgrey",
+    fill = "grey",
+    alpha = 0.3
+  ) +
+  geom_line(
+    aes(y = freq.yule)
+  ) +
+  scale_x_log10() +
+  xlab("number of species in clade") +
+  scale_y_log10() +
+  ylab("clade frequency") +
+  scale_colour_brewer(palette = "Paired") +
+  facet_wrap(. ~ series, nrow = 2) +
+  theme_minimal(base_family = "Avenir Next", base_size = 8) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "darkgrey"),
+    #axis.title.x = element_blank(),
+    axis.title = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.text = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    strip.text.y = element_blank(),
+  ) +
+  NULL
+
+ggsave(
+  p.yule.others,
+  filename = paste0(PARAM$folder.base, "results/yule.gbif_gtdb_map.pdf"),
+  width = 180,
+  height = 90,
+  unit = "mm",
+  device = cairo_pdf
+)
+```
+
+Plot an overview of inferred omega and rho values.
+
+```{r}
+fit.genus.willis.summarised <- fit.genus.willis %>%
+  filter(term == "size") %>%
+  select(series, omega = estimate) %>%
+  separate(series, sep = "\\.", into = c("reference", "group", "marker_id", "marker_id2")) %>%
+  
+  group_by(reference, group) %>%
+  summarise(omega = median(omega)) %>%
+  ungroup() %>%
+  mutate(type = "omega (Willis)") %>%
+  rename(value = omega) %>%
+  mutate(value = 0 - value)
+
+fit.genus.yule.summarised <- fit.genus.yule %>%
+  select(series, rho) %>%
+  separate(series, sep = "\\.", into = c("reference", "group", "marker_id")) %>%
+  group_by(reference, group) %>%
+  summarise(rho = median(rho)) %>%
+  ungroup() %>%
+  mutate(type = "rho (Yule)") %>%
+  rename(value = rho)
+
+bind_rows(
+  fit.genus.willis.summarised,
+  fit.genus.yule.summarised
+) %>%
+  mutate(
+    reference = fct_relevel(reference, c("gtdb", "spire", "spire_by_phylum", "gbif", "mapref")),
+    #group = fct_relevel(group, c("archaea", "bacteria", "viruses", "protozoa", "chromista", "fungi", "animalia", "plantae"))
+  ) %>%
+  ggplot(aes(x = group, y = value, fill = group, group = group)) +
+  geom_hline(yintercept = 1, colour = "#525252") +
+  geom_point(
+    shape = 21,
+    colour = "darkgrey",
+    size = 3
+  ) +
+  scale_fill_brewer(palette = "Paired") +
+  scale_y_continuous(trans = "log2", limits = c(0.5, 2)) +
+  facet_grid(type ~ reference, scales = "free_x", space = "free_x") +
+  theme_minimal(base_family = "Avenir Next") +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+    axis.title.x = element_blank(),
+    legend.position = "none"
+  )
+```
+
+Perform Yule fits on subclades-within-clades.
+
+```{r}
+fit.yulesimon.subclade <- function(data) {
+  my.res <- tryCatch({
+    myfit <- suppressWarnings(vglm(data$size ~ 1, family = yulesimon, na.action = na.omit))
+    mysummary <- summary(myfit)
+    
+    tibble(
+      estimate = coef(myfit)[[1]],
+      rho = exp(estimate),
+      df.total = myfit@df.total,
+      std.error = coef(mysummary)[, "Std. Error"],
+      log.lik = logLik(myfit),
+      z = coef(mysummary)[, "z value"],
+      p = coef(mysummary)[, "Pr(>|z|)"]
+    )
+  },
+    error = function(err) {
+      tibble(
+        estimate = as.numeric(NA),
+        rho = as.numeric(NA),
+        df.total = as.numeric(NA),
+        std.error = as.numeric(NA),
+        log.lik = as.numeric(NA),
+        z = as.numeric(NA),
+        p = as.numeric(NA)
+      )
+    }
+  )
+  
+  return(my.res)
+}
+
+res.yule.subclade <- bind_rows(
+  collect.subclade.sizes.bac %>% mutate(domain = "Bacteria"),
+  collect.subclade.sizes %>% mutate(domain = "Archaea")
+) %>%
+  #filter(marker_id == "PF00827.18") %>%
+  #filter(level == "class") -> data
+  group_by(domain, marker_id, level) %>%
+  #mutate(size = log10(size), n = log10(n)) %>%
+  nest() %>%
+  mutate(
+    fit = purrr::map(data, ~fit.yulesimon.subclade(data = .x))
+  ) %>%
+  unnest(fit) %>%
+  select(-data) %>%
+  ungroup()
+```
+
+Repeat with "regular" power law fit.
+
+```{r}
+res.willis.subclade <- bind_rows(
+  collect.subclade.sizes.bac %>% mutate(domain = "Bacteria"),
+  collect.subclade.sizes %>% mutate(domain = "Archaea")
+) %>%
+  group_by(domain, marker_id, level, size) %>%
+  tally %>%
+  mutate(
+    size = log10(size),
+    n = log10(n)
+  ) %>%
+  group_by(domain, marker_id, level) %>%
+  #filter(marker_id == "PF00827.18" & level == "family") -> tmp.dat
+  nest() %>%
+  mutate(
+    fit.raw = purrr::map(data, ~lm(n ~ size, data = .x)),
+    fit = purrr::map(fit.raw, broom::tidy),
+    log.lik = purrr::map(fit.raw, function(x) logLik(x)[[1]])
+  ) %>%
+  unnest(fit, log.lik) %>%
+  select(-data) %>%
+  select(-fit.raw) %>%
+  ungroup() %>%
+  mutate(level = fct_relevel(level, c("phylum", "class", "order", "family", "genus")))
+
+res.willis.subclade %>%
+  filter(term != "(Intercept)") %>%
+  mutate(coef = 0 - estimate) %>%
+  ggplot(aes(x = level, y = coef, fill = level, colour = level, group = interaction(level, domain))) +
+  geom_boxplot(fill = NA, colour = "darkgrey", outlier.colour = NA) +
+  geom_point(
+    position = position_jitterdodge(),
+    shape = 21,
+    colour = "#252525"
+  ) +
+  scale_fill_brewer(palette = "Paired") +
+  scale_color_brewer(palette = "Paired") +
+  theme_minimal()
+```
+
+Generate plot: species-per-clade for one selected marker gene.
+
+```{r, fig.width=10, fig.height=3}
+plot.yule <- tmp.willis %>%
+  ungroup() %>%
+  left_join(res.yule %>% select(marker_id, level, estimate, rho), by = c("marker_id", "level")) %>%
+  left_join(
+    res.willis %>%
+      select(marker_id, level, term, estimate) %>%
+      pivot_wider(names_from = "term", values_from = "estimate") %>%
+      rename(Intercept = `(Intercept)`, coef.willis = size),
+    by = c("marker_id", "level")
+  ) %>%
+  mutate(
+    p.yule = dyules(size, shape = rho)
+  ) %>%
+  group_by(
+    marker_id, level
+  ) %>%
+  mutate(
+    predict.yule = p.yule * sum(n),
+    predict.yule.adj = pmax(predict.yule, 1),
+    predict.willis = 10 ^ (Intercept + coef.willis * log10(size))
+  ) %>%
+  ungroup() %>%
+  mutate(
+    level = fct_relevel(level, c("genus", "family", "order", "class", "phylum"))
+  )
+
+p.yule <- plot.yule %>%
+  filter(marker_id == "TIGR00095") %>%
+  ggplot(aes(x = size, y = n, group = level, colour = level, fill = level)) +
+  #geom_smooth(method = "lm", se = F) +
+  geom_point(
+    shape = 21,
+    colour = "#525252",
+    stroke = 0.25,
+    size = 2
+  ) +
+  geom_line(
+    aes(y = predict.yule),
+    colour = "#969696",
+    linewidth = 0.5
+  ) +
+  scale_x_continuous(
+    trans = "log10",
+    limits = c(1, 10000),
+    breaks = c(1, 10, 100, 1000, 10000),
+    labels = as.character(c("1", "10", "100", "1k", "10k"))
+  ) +
+  xlab("number of species in clade") +
+  scale_y_continuous(
+    trans = "log10",
+    limits = c(1, 100000),
+    breaks = c(1, 10, 100, 1000, 10000, 100000),
+    labels = as.character(c("1", "10", "100", "1k", "10k", "100k"))
+  ) +
+  ylab("number of clades") +
+  scale_fill_brewer(palette = "Paired") +
+  facet_grid(marker_id ~ level) +
+  theme_minimal(base_family = "Avenir Next", base_size = 8) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "darkgrey"),
+    #axis.title.x = element_blank(),
+    axis.title = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.text = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    strip.text.y = element_blank(),
+  ) +
+  NULL
+p.yule
+
+ggsave(
+  p.yule,
+  filename = paste0(PARAM$folder.base, "results/yule.scatter.main.pdf"),
+  width = 180,
+  height = 50,
+  unit = "mm",
+  device = cairo_pdf
+)
+```
+
+Generate power-law scatter plot for subclade-within-clade distributions.
+
+```{r, fig.height=3, fig.width=8}
+plot.yule.subclades <- bind_rows(
+  collect.subclade.sizes.bac %>% mutate(domain = "Bacteria"),
+  collect.subclade.sizes %>% mutate(domain = "Archaea")
+) %>%
+  group_by(domain, marker_id, level, size) %>%
+  tally %>%
+  ungroup() %>%
+  left_join(res.yule.subclade %>% select(marker_id, level, estimate, rho), by = c("marker_id", "level")) %>%
+  left_join(
+    res.willis.subclade %>%
+      select(marker_id, level, term, estimate) %>%
+      pivot_wider(names_from = "term", values_from = "estimate") %>%
+      rename(Intercept = `(Intercept)`, coef.willis = size),
+    by = c("marker_id", "level")
+  ) %>%
+  mutate(
+    p.yule = dyules(size, shape = rho)
+  ) %>%
+  group_by(
+    marker_id, level
+  ) %>%
+  mutate(
+    predict.yule = p.yule * sum(n),
+    predict.yule.adj = pmax(predict.yule, 1),
+    predict.willis = 10 ^ (Intercept + coef.willis * log10(size))
+  ) %>%
+  ungroup() %>%
+  mutate(
+    level.label = case_when(
+      level == "family" ~ "genera per family",
+      level == "order" ~ "families per order",
+      level == "class" ~ "orders per class",
+      level == "phylum" ~ "classes per phylum"
+    )
+  ) %>%
+  mutate(
+    level = fct_relevel(level, c("family", "order", "class", "phylum")),
+    level.label = fct_relevel(level.label, c(
+      "genera per family",
+      "families per order",
+      "orders per class",
+      "classes per phylum"
+    ))
+  )
+
+p.yule.subclade <- plot.yule.subclades %>%
+  filter(marker_id == "TIGR00095") %>%
+  ggplot(aes(x = size, y = n, group = level.label, colour = level.label, fill = level.label)) +
+  #geom_smooth(method = "lm", se = F) +
+  geom_point(
+    shape = 21,
+    colour = "#525252",
+    stroke = 0.25,
+    size = 2
+  ) +
+  geom_line(
+    aes(y = predict.yule),
+    colour = "#969696",
+    linewidth = 0.5
+  ) +
+  scale_x_continuous(
+    trans = "log10",
+    limits = c(1, 10000),
+    breaks = c(1, 10, 100, 1000, 10000),
+    labels = as.character(c("1", "10", "100", "1k", "10k"))
+  ) +
+  xlab("number of subclades in clade") +
+  scale_y_continuous(
+    trans = "log10",
+    limits = c(1, 12000),
+    breaks = c(1, 10, 100, 1000, 10000),
+    labels = as.character(c("1", "10", "100", "1k", "10k"))
+  ) +
+  ylab("number of clades") +
+  scale_fill_manual(values = RColorBrewer::brewer.pal(5, "Paired")[2:5]) +
+  #scale_fill_brewer(palette = "Paired") +
+  facet_grid(marker_id ~ level.label) +
+  theme_minimal(base_family = "Avenir Next", base_size = 8) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "darkgrey"),
+    #axis.title.x = element_blank(),
+    axis.title = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.text = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    strip.text.y = element_blank(),
+  ) +
+  NULL
+p.yule.subclade
+
+ggsave(
+  p.yule.subclade,
+  filename = paste0(PARAM$folder.base, "results/yule.scatter.subclade.pdf"),
+  width = 150,
+  height = 50,
+  unit = "mm",
+  device = cairo_pdf
+)
+```
+
+Plot boxplot of derived rho values.
+
+```{r}
+p.yule.box <- bind_rows(
+  res.yule %>%
+    mutate(
+      model = "yule",
+      type = "species per clade"
+    ) %>%
+    select(marker_id, domain, level, rho, type),
+  res.yule.subclade %>%
+    mutate(
+      model = "yule",
+      type = "subclades per clade"
+    ) %>%
+    select(marker_id, domain, level, rho, type)
+) %>%
+  filter(rho < 10) %>%
+  mutate(level = fct_relevel(level, rev(c("phylum", "class", "order", "family", "genus")))) %>%
+  ggplot(aes(x = level, y = rho, fill = level, colour = level, group = interaction(level, domain))) +
+  geom_boxplot(fill = NA, colour = "#252525", outlier.colour = NA, linewidth = 0.3) +
+  geom_point(
+    position = position_jitterdodge(),
+    shape = 21,
+    colour = "#252525",
+    size = 1,
+    stroke = 0.3
+  ) +
+  scale_fill_brewer(palette = "Paired") +
+  scale_color_brewer(palette = "Paired") +
+  scale_y_continuous(
+    trans = "sqrt",
+    limits = c(0.2,5),
+    breaks = c(seq(0.2, 1, by = 0.1), seq(1.2, 2, by = 0.2), 3, 4, 5)
+  ) +
+  ylab("Yule-Simon coefficient ρ") +
+  facet_wrap(. ~ type, ncol = 2, scales = "free_x") +
+  theme_minimal(base_family = "Avenir Next", base_size = 8) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "darkgrey"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.text = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    strip.text.y = element_blank(),
+  ) +
+  NULL
+p.yule.box
+
+
+p.willis.box <- bind_rows(
+  res.willis %>%
+    mutate(
+      model = "willis",
+      type = "species per clade",
+      omega = 0 - estimate
+    ) %>%
+    filter(term == "size") %>%
+    select(marker_id, domain, level, omega, type),
+  res.willis.subclade %>%
+    mutate(
+      model = "willis",
+      type = "subclades per clade",
+      omega = 0 - estimate
+    ) %>%
+    filter(term == "size") %>%
+    select(marker_id, domain, level, omega, type)
+) %>%
+  filter(omega < 3) %>%
+  mutate(level = fct_relevel(level, rev(c("phylum", "class", "order", "family", "genus")))) %>%
+  ggplot(aes(x = level, y = omega, fill = level, colour = level, group = interaction(level, domain))) +
+  geom_boxplot(fill = NA, colour = "#252525", outlier.colour = NA, linewidth = 0.3) +
+  geom_point(
+    position = position_jitterdodge(),
+    shape = 21,
+    colour = "#252525",
+    size = 1,
+    stroke = 0.3
+  ) +
+  scale_fill_brewer(palette = "Paired") +
+  scale_color_brewer(palette = "Paired") +
+  scale_y_continuous(
+    trans = "sqrt",
+    limits = c(0,2.5),
+    breaks = c(0, 0.1, seq(0.2, 1, by = 0.1), seq(1.2, 2.4, by = 0.2))
+  ) +
+  ylab("Willis coefficient ω") +
+  facet_wrap(. ~ type, ncol = 2, scales = "free_x") +
+  theme_minimal(base_family = "Avenir Next", base_size = 8) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "darkgrey"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.text = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    strip.text.y = element_blank(),
+  ) +
+  NULL
+p.willis.box
+
+#Merge both plots
+extrafont::loadfonts()
+p.box.combined <- cowplot::plot_grid(
+  p.willis.box,
+  p.yule.box,
+  align = "h"
+)
+
+ggsave(
+  p.box.combined,
+  filename = paste0(PARAM$folder.base, "results/yule.box.pdf"),
+  width = 180,
+  height = 60,
+  unit = "mm",
+  device = cairo_pdf
+)
+
+```
+
+
+## Fit Yule curves per habitat
+
+Preallocate function to infer Yule fit.
+
+```{r}
+library(VGAM)
+
+fit.yulesimon <- function(data) {
+  count.vec <- rep(data$size, times = data$n)  
+
+  my.res <- tryCatch({
+    myfit <- suppressWarnings(vglm(count.vec ~ 1, family = yulesimon, na.action = na.omit))
+    mysummary <- summary(myfit)
+    
+    tibble(
+      estimate = coef(myfit)[[1]],
+      rho = exp(estimate),
+      df.total = myfit@df.total,
+      std.error = coef(mysummary)[, "Std. Error"],
+      log.lik = logLik(myfit),
+      z = coef(mysummary)[, "z value"],
+      p = coef(mysummary)[, "Pr(>|z|)"]
+    )
+  },
+    error = function(err) {
+      tibble(
+        estimate = as.numeric(NA),
+        rho = as.numeric(NA),
+        df.total = as.numeric(NA),
+        std.error = as.numeric(NA),
+        log.lik = as.numeric(NA),
+        z = as.numeric(NA),
+        p = as.numeric(NA)
+      )
+    }
+  )
+  
+  return(my.res)
+}
+```
+
+Perform Yule fits.
+
+```{r}
+fit.yule.spire.by_habitat <- bind_rows(
+  spire.habitat.sizes.arc %>%
+    filter(level == "genus") %>%
+    mutate(domain = "Archaea"),
+  spire.habitat.sizes.bac %>%
+    filter(level == "genus") %>%
+    mutate(domain = "Bacteria")
+) %>%
+  group_by(marker_id, domain, level, node, h5) %>%
+  summarise(size = sum(n)) %>%
+  filter(!is.na(h5)) %>%
+  group_by(marker_id, domain, h5, size) %>%
+  tally %>%
+  group_by(marker_id, domain, h5) %>%
+  nest() %>%
+  mutate(
+    fit = purrr::map(data, ~fit.yulesimon(data = .x))
+  ) %>%
+  unnest(fit) %>%
+  select(-data) %>%
+  ungroup()
+
+```
+
+Does `rho` correlate with sampling effort?
+
+```{r, fig.width=10, fig.height=8}
+my.cols <- c(
+  #"#8B4513", #intestine
+  "#762a83", #intestine
+  "#f1b6da", #human (other)
+  "#D6A4AF", #anthropogenic
+  "#62BD69", #plant host
+  "#C9A244", #soil
+  #"#4373A4", #aquatic
+  "#16d0ff", #aquatic
+  "#c7e9c0", #air
+  "#9fa8a3" #other
+)
+
+p.yule.by_habitat <- fit.yule.spire.by_habitat %>%
+  filter(p < 0.1) %>%
+  filter(rho < 3) %>%
+  #summarise across marker genes
+  group_by(domain, h5) %>%
+  filter(n() > 5) %>%
+  summarise(rho = median(rho, na.rm = T)) %>%
+  ungroup() %>%
+  left_join(
+    dat.sample.yule %>%
+      group_by(h5, h5.cat) %>%
+      tally(),
+    by = "h5"
+  ) %>%
+  filter(domain == "Bacteria") %>%
+  ggplot(aes(x = n, y = rho, fill = h5.cat)) +
+  geom_smooth(
+    #data = . %>% filter(h5.cat %in% c("intestine", "aquatic")),
+    aes(group = domain),
+    se = F,
+    method = "lm",
+    colour = "darkgrey"
+  ) +
+  # scale_colour_manual(values = c("#762a83", "#16d0ff")) +
+  # ggnewscale::new_scale_color() +
+  geom_point(
+    shape = 21,
+    colour = "#252525",
+    size = 2,
+    stroke = 0.3
+  ) +
+  scale_x_continuous(
+    trans = "log10",
+    breaks = c(seq(100, 900, by = 100), seq(1000, 10000, by = 1000), 20000)
+    #breaks = c(500, 1000, 5000, 10000, 20000),
+    #labels = c("500", "1,000", "5,000", "10,000", "20,000")
+  ) +
+  scale_y_continuous(
+    #trans = "sqrt",
+    limits = c(0.3,1.41),
+    breaks = c(seq(0.3, 1.4, by = 0.1))
+  ) +
+  scale_colour_manual(values = my.cols) +
+  scale_fill_manual(values = my.cols) +
+  xlab("number of samples") +
+  ylab("Yule coefficient ρ") +
+  #facet_grid(. ~ domain) +
+  theme_minimal(base_family = "Avenir Next", base_size = 8) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.1, colour = "darkgrey"),
+    #axis.title.x = element_blank(),
+    axis.title = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    axis.text = element_text(family = "Avenir Next", size = 5, colour = "#252525"),
+    strip.text = element_text(family = "Avenir Next", size = 8, colour = "#252525"),
+    strip.text.y = element_blank(),
+  ) +
+  NULL
+p.yule.by_habitat
+
+ggsave(
+  p.yule.by_habitat,
+  filename = paste0(PARAM$folder.base, "results/yule.by_habitat_size.pdf"),
+  width = 90,
+  height = 60,
+  unit = "mm",
+  device = cairo_pdf
+)
+```
+
+```{r}
+fit.yule.spire.by_habitat %>%
+  filter(p < 0.1) %>%
+  #filter(domain == "Bacteria") %>%
+  #filter(rho < 3) %>%
+  #summarise across marker genes
+  group_by(domain, h5) %>%
+  filter(n() > 5) %>%
+  summarise(rho = median(rho, na.rm = T)) %>%
+  ungroup() %>%
+  left_join(
+    dat.sample.yule %>%
+      group_by(h5, h5.cat) %>%
+      tally(),
+    by = "h5"
+  ) %>%
+  group_by(h5, domain) %>%
+  arrange(desc(n)) %>%
+  lm(rho ~ domain + h5.cat + log(n), data = .) %>%
+  summary
+  group_by(domain) %>%
+  summarise(cor.spearman = cor(rho, n, method = "spearman"))
+```
+
+
+-----
+
+
+
+
+---
+
